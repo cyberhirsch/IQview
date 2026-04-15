@@ -10,6 +10,8 @@
 #include <QShortcut>
 #include <QNetworkAccessManager>
 #include <QStack>
+#include <QLabel>
+#include <QTimer>
 
 namespace Ui {
 class MainWindow;
@@ -40,6 +42,7 @@ public:
     void updateWindowFilePath();
 
     void setWindowSize();
+    QVGraphicsView *getGraphicsView() { return graphicsView; }
 
     bool getIsPixmapLoaded() const;
 
@@ -116,6 +119,9 @@ public:
     void applyRetouch();
     void changeBrushSize(int delta);
 
+    // HUD
+    void updateZoomLabel(qreal factor);
+
     int getTitlebarOverlap() const;
 
     const QVImageCore::FileDetails &getCurrentFileDetails() const
@@ -184,6 +190,8 @@ private:
 
     QTimer *populateOpenWithTimer;
     QFutureWatcher<QList<OpenWith::OpenWithItem>> openWithFutureWatcher;
+    QLabel *zoomLabel = nullptr;
+    QTimer *zoomTimer = nullptr;
 };
 
 #endif // MAINWINDOW_H

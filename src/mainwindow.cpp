@@ -58,6 +58,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
 
     // Connect graphicsview signals
     connect(graphicsView, &QVGraphicsView::fileChanged, this, &MainWindow::fileChanged);
+    connect(graphicsView, &QVGraphicsView::zoomChanged, this, &MainWindow::updateZoomLabel);
     connect(graphicsView, &QVGraphicsView::updatedLoadedPixmapItem, this,
             &MainWindow::setWindowSize);
     connect(graphicsView, &QVGraphicsView::cancelSlideshow, this, &MainWindow::cancelSlideshow);
@@ -489,7 +490,7 @@ void MainWindow::refreshProperties()
 
 void MainWindow::updateWindowTitle()
 {
-    QString newString = "qView";
+    QString newString = "iqView";
     if (getCurrentFileDetails().fileInfo.isFile()) {
         switch (qvApp->getSettingsManager().getInt(SettingsManager::Setting::TitleBarMode)) {
         case 1: {
@@ -512,7 +513,7 @@ void MainWindow::updateWindowTitle()
                 newString +=
                         " - " + QVInfoDialog::formatBytes(getCurrentFileDetails().fileInfo.size());
             }
-            newString += " - qView";
+            newString += " - iqView";
             break;
         }
         }
@@ -1209,4 +1210,30 @@ void MainWindow::applyRetouch()
 void MainWindow::changeBrushSize(int delta)
 {
     graphicsView->changeBrushSize(delta);
+}
+
+void MainWindow::updateZoomLabel(qreal factor)
+{
+    if (!zoomLabel) {
+        zoomLabel = new QLabel(this);
+        zoomLabel->setAlignment(Qt::AlignCenter);
+        zoomLabel->setStyleSheet("background-color: rgba(0, 0, 0, 150); color: white; border-radius: 5px; padding: 5px 10px; font-weight: bold;");
+        zoomLabel->setMinimumWidth(80);
+        zoomLabel->hide();
+        
+        zoomTimer = new QTimer(this);
+        zoomTimer->setSingleShot(true);
+        connect(zoomTimer, &QTimer::timeout, zoomLabel, &QLabel::hide);
+    }
+
+    int percentage = qRound(factor * 100);
+    zoomLabel->setText(tr("%1%").arg(percentage));
+    
+    int x = (width() - zoomLabel->width()) / 2;
+    int y = 20; 
+    zoomLabel->move(x, y);
+    
+    zoomLabel->show();
+    zoomLabel->raise();
+    zoomTimer->start(1500); 
 }

@@ -1,119 +1,168 @@
-import os
-import sys
 import argparse
-import numpy as np
+import os
 import cv2
-import urllib.request
-from pathlib import Path
+import numpy as np
+import onnxruntime as ort
+import sys
 
-# Try to import onnxruntime
-try:
-    import onnxruntime as ort
-except ImportError:
-    print("Error: onnxruntime not found. Please install with 'pip install onnxruntime-gpu'")
-    sys.exit(1)
+def log(msg, log_path):
+    with open(log_path, "a") as f:
+        f.write(msg + "\n")
+    print(msg)
 
-MODEL_URL = "https://huggingface.co/anyisalin/big-lama-onnx/resolve/main/onnx/model.onnx"
-MODEL_PATH = Path(__file__).parent / "model.onnx"
-
-def download_model():
-    if not MODEL_PATH.exists():
-        # Using stderr for status so it doesn't pollute stdout if needed, 
-        # but we'll stick to print for now as C++ reads both.
-        sys.stderr.write(f"Downloading model (200MB) to {MODEL_PATH}...\n")
-        opener = urllib.request.build_opener()
-        opener.addheaders = [('User-agent', 'Mozilla/5.0')]
-        urllib.request.install_opener(opener)
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        sys.stderr.write("Download complete.\n")
-
-def pad_img(img, pad_factor=8):
-    h, w = img.shape[:2]
-    pad_h = (pad_factor - h % pad_factor) % pad_factor
-    pad_w = (pad_factor - w % pad_factor) % pad_factor
-    img = np.pad(img, ((0, pad_h), (0, pad_w), (0, 0)), mode='reflect')
-    return img, pad_h, pad_w
-
-def inpaint(image_path, mask_path, output_path):
-    download_model()
-
-    # Load image and mask
-    img = cv2.imread(image_path)
-    if img is None: raise ValueError(f"Could not load image {image_path}")
-    img_orig = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    
-    mask_bgr = cv2.imread(mask_path)
-    if mask_bgr is None: raise ValueError(f"Could not load mask {mask_path}")
-    mask = np.max(mask_bgr, axis=2)
-    
-    # Process mask
-    _, mask = cv2.threshold(mask, 10, 255, cv2.THRESH_BINARY)
-    
-    # Pad/Resize to 512x512
-    orig_h, orig_w = img_orig.shape[:2]
-    img_512 = cv2.resize(img_orig, (512, 512), interpolation=cv2.INTER_AREA)
-    mask_512 = cv2.resize(mask, (512, 512), interpolation=cv2.INTER_NEAREST)
-
-    # Normalize
-    img_512 = img_512.astype(np.float32) / 255.0
-    mask_512 = mask_512.astype(np.float32) / 255.0
-    mask_512 = (mask_512 > 0.5).astype(np.float32) # Ensure binary [0, 1]
-    mask_512 = mask_512[None, None, :, :] 
-
-    # Prepare input for LaMa
-    img_512 = img_512.transpose(2, 0, 1)[None, :, :, :] 
-
-    # Initialize ONNX session
-    so = ort.SessionOptions()
-    so.log_severity_level = 3
-    
-    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    session = ort.InferenceSession(str(MODEL_PATH), sess_options=so, providers=providers)
-    
-    # Use dynamic names to be 100% sure
-    input_names = [i.name for i in session.get_inputs()]
-    # Typically ['l_image_', 'l_mask_']
-    inputs = {
-        input_names[0]: img_512,
-        input_names[1]: mask_512
-    }
-    
-    # Run inference
-    result = session.run(None, inputs)[0]
-    
-    # Post-process
-    result = result[0].transpose(1, 2, 0)
-    if result.max() <= 1.01:
-        result = np.clip(result * 255, 0, 255).astype(np.uint8)
-    else:
-        result = np.clip(result, 0, 255).astype(np.uint8)
-    
-    # Resize back to original
-    result = cv2.resize(result, (orig_w, orig_h), interpolation=cv2.INTER_LANCZOS4)
-    
-    # RE-ENABLING BLENDING: Only apply result to the MASKED area 
-    # This keeps the rest of the image at full, original resolution
-    mask_blurred = cv2.GaussianBlur(mask, (7, 7), 0)
-    mask_alpha = mask_blurred.astype(np.float32) / 255.0
-    mask_alpha = mask_alpha[:, :, None]
-    
-    final = (result.astype(np.float32) * mask_alpha + img_orig.astype(np.float32) * (1.0 - mask_alpha))
-    final = np.clip(final, 0, 255).astype(np.uint8)
-    
-    # Convert back to BGR for saving
-    final_bgr = cv2.cvtColor(final, cv2.COLOR_RGB2BGR)
-    cv2.imwrite(output_path, final_bgr)
-
-if __name__ == "__main__":
+def get_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--image", required=True)
     parser.add_argument("--mask", required=True)
     parser.add_argument("--output", required=True)
-    args = parser.parse_args()
+    parser.add_argument("--model", default=None)
+    return parser.parse_args()
 
-    try:
-        inpaint(args.image, args.mask, args.output)
-        sys.exit(0)
-    except Exception as e:
-        sys.stderr.write(f"RET_ERR: {str(e)}\n")
-        sys.exit(1)
+def main():
+    args = get_args()
+    temp_dir = os.path.dirname(args.output)
+    log_path = os.path.join(temp_dir, "iqview_retouch_log.txt")
+    
+    # Reset log
+    with open(log_path, "w") as f:
+        f.write("--- iqView Retouch Session Start ---\n")
+    
+    log(f"Input Image: {args.image}", log_path)
+    log(f"Input Mask: {args.mask}", log_path)
+    
+    # Load image and mask
+    img = cv2.imread(args.image)
+    mask = cv2.imread(args.mask, 0)
+    
+    if img is None or mask is None:
+        log(f"RET_ERR: Loading failed. Image: {img is not None}, Mask: {mask is not None}", log_path)
+        return
+
+    log(f"Image Shape: {img.shape}", log_path)
+    log(f"Mask Shape: {mask.shape}", log_path)
+
+    # Ensure mask is binary - more sensitive threshold
+    _, mask = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
+    
+    # Find bounding box of the mask for ROI
+    coords = cv2.findNonZero(mask)
+    if coords is None:
+        log("No mask pixels found! Skipping ROI.", log_path)
+        cv2.imwrite(args.output, img)
+        return
+
+    log(f"Found {len(coords)} mask pixels.", log_path)
+    x, y, w, h = cv2.boundingRect(coords)
+    log(f"Bounding Box: x={x}, y={y}, w={w}, h={h}", log_path)
+    
+    # Add padding for context
+    padding = max(w, h, 256) # Larger padding for better context
+    h_orig, w_orig = img.shape[:2]
+    
+    x1 = max(0, x - padding)
+    y1 = max(0, y - padding)
+    x2 = min(w_orig, x + w + padding)
+    y2 = min(h_orig, y + h + padding)
+    
+    log(f"ROI Crop: {x1, y1} to {x2, y2}", log_path)
+    
+    # 1. Save ROI High-Res Crop for user
+    roi_img = img[y1:y2, x1:x2]
+    roi_mask = mask[y1:y2, x1:x2]
+    roi_h, roi_w = roi_img.shape[:2]
+    cv2.imwrite(os.path.join(temp_dir, "iqview_retouch_roi_img.png"), roi_img)
+    log("Saved iqview_retouch_roi_img.png", log_path)
+
+    # Prepare model
+    model_path = args.model
+    if not model_path or not os.path.exists(model_path):
+        model_path = os.path.join(os.path.dirname(__file__), "big-lama.onnx")
+
+    if not os.path.exists(model_path):
+        log(f"Model missing at {model_path}. Attempting to download from HuggingFace...", log_path)
+        try:
+            from huggingface_hub import hf_hub_download
+            import shutil
+            hf_path = hf_hub_download(repo_id="anyisalin/big-lama-onnx", filename="onnx/model.onnx")
+            shutil.copy(hf_path, model_path)
+            log(f"Successfully downloaded to {model_path}", log_path)
+        except Exception as e:
+            log(f"RET_ERR: Failed to download model: {e}", log_path)
+            return
+
+    log(f"Using model: {model_path}", log_path)
+    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
+    session = ort.InferenceSession(model_path, providers=providers)
+    
+    # Log model metadata for debugging
+    for i, inp in enumerate(session.get_inputs()):
+        log(f"Model Input {i}: name='{inp.name}', shape={inp.shape}, type={inp.type}", log_path)
+    for i, out in enumerate(session.get_outputs()):
+        log(f"Model Output {i}: name='{out.name}', shape={out.shape}, type={out.type}", log_path)
+    
+    # 2. Resize ROI to 512x512 and Save for user
+    target_size = 512
+    img_prep = cv2.cvtColor(roi_img, cv2.COLOR_BGR2RGB)
+    img_prep = cv2.resize(img_prep, (target_size, target_size), interpolation=cv2.INTER_AREA)
+    mask_prep = cv2.resize(roi_mask, (target_size, target_size), interpolation=cv2.INTER_NEAREST)
+    cv2.imwrite(os.path.join(temp_dir, "iqview_retouch_roi_mask_512.png"), mask_prep)
+    log("Saved iqview_retouch_roi_mask_512.png", log_path)
+    
+    # To Tensor
+    t_img = img_prep.transpose(2, 0, 1).astype(np.float32) / 255.0
+    t_mask = mask_prep[np.newaxis, ...].astype(np.float32) / 255.0
+    
+    # LaMa standard: hole should be 0 in input image
+    t_img = t_img * (1.0 - t_mask)
+    
+    t_img = t_img[np.newaxis, ...]
+    t_mask = t_mask[np.newaxis, ...]
+
+    log(f"Tensor stats - Image: min={t_img.min():.3f}, max={t_img.max():.3f}", log_path)
+    log(f"Tensor stats - Mask: min={t_mask.min():.3f}, max={t_mask.max():.3f}", log_path)
+
+    inputs = {
+        session.get_inputs()[0].name: t_img,
+        session.get_inputs()[1].name: t_mask
+    }
+    
+    # Inference
+    log("Running inference...", log_path)
+    output_raw = session.run(None, inputs)[0]
+    log(f"Inference complete. Raw Output stats: min={output_raw.min():.3f}, max={output_raw.max():.3f}, mean={output_raw.mean():.3f}", log_path)
+    
+    # Handle range 0-1 vs 0-255
+    res = output_raw[0]
+    if output_raw.max() > 2.0:
+        log("Detected 0-255 output range from model.", log_path)
+    else:
+        log("Detected 0-1 output range from model. Scaling by 255.", log_path)
+        res = res * 255.0
+    
+    # 3. Save raw 512x512 Output for user
+    out_img = res.transpose(1, 2, 0).clip(0, 255).astype(np.uint8)
+    out_img = cv2.cvtColor(out_img, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(os.path.join(temp_dir, "iqview_retouch_roi_out_512.png"), out_img)
+    log("Saved iqview_retouch_roi_out_512.png", log_path)
+    
+    # Resize output back to ROI size
+    result_roi = cv2.resize(out_img, (roi_w, roi_h), interpolation=cv2.INTER_LANCZOS4)
+    
+    # Blend and Paste
+    mask_alpha = (roi_mask / 255.0)[:, :, np.newaxis].astype(np.float32)
+    # Larger blur for smoother transitions and expansion
+    mask_alpha = cv2.dilate(mask_alpha, np.ones((5, 5), np.uint8))
+    mask_alpha = cv2.GaussianBlur(mask_alpha, (15, 15), 0)
+    if mask_alpha.ndim == 2: mask_alpha = mask_alpha[..., np.newaxis]
+    if len(mask_alpha.shape) == 2: mask_alpha = mask_alpha[..., np.newaxis]
+
+    blended_roi = (result_roi.astype(np.float32) * mask_alpha + roi_img.astype(np.float32) * (1 - mask_alpha)).astype(np.uint8)
+    
+    final_img = img.copy()
+    final_img[y1:y2, x1:x2] = blended_roi
+    
+    cv2.imwrite(args.output, final_img)
+    log("SUCCESS - final_img saved.", log_path)
+
+if __name__ == "__main__":
+    main()

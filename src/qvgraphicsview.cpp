@@ -447,6 +447,7 @@ void QVGraphicsView::zoom(qreal scaleFactor, const QPoint &pos)
     } else {
         centerOn(loadedPixmapItem);
     }
+    emit zoomChanged(qFabs(absoluteTransform.m11()));
 
     if (qvGetSettingBool(ScalingEnabled) && !isOriginalSize) {
         expensiveScaleTimerNew->start();
@@ -455,6 +456,8 @@ void QVGraphicsView::zoom(qreal scaleFactor, const QPoint &pos)
 
 void QVGraphicsView::scaleExpensively()
 {
+    if (retouchTool != RetouchTool::Off) return;
+
     // Determine if mirrored or flipped
     bool mirrored = false;
     if (transform().m11() < 0)
@@ -594,6 +597,7 @@ void QVGraphicsView::originalSize()
     zoomBasis = transform();
     zoomBasisScaleFactor = 1.0;
     absoluteTransform = transform();
+    emit zoomChanged(qFabs(absoluteTransform.m11()));
 
     isOriginalSize = true;
 }
@@ -774,6 +778,7 @@ void QVGraphicsView::fitInViewMarginless(const QRectF &rect)
     currentScale = 1.0;
     updateFilteringMode();
     zoomBasisScaleFactor = 1.0;
+    emit zoomChanged(qFabs(absoluteTransform.m11()));
 }
 
 void QVGraphicsView::fitInViewMarginless(const QGraphicsItem *item)
@@ -858,14 +863,21 @@ void QVGraphicsView::toggleRetouchMode()
     else retouchTool = RetouchTool::Off;
 
     if (retouchTool != RetouchTool::Off) {
+        // Prevent scaling while editing so mask coordinates map correctly to full res
+        if (qvGetSettingBool(ScalingEnabled)) {
+            makeUnscaled();
+            scale(currentScale, currentScale);
+        }
+
         setDragMode(QGraphicsView::NoDrag);
         setMouseTracking(true);
         viewport()->setCursor(Qt::BlankCursor); 
 
-        // Prepare mask image if empty
-        if (maskImage.isNull()) {
-            QSize imgSize = getCurrentFileDetails().baseImageSize;
-            maskImage = QImage(imgSize, QImage::Format_ARGB32);
+        // Prepare mask image if empty or different size
+        // Use the actual oriented pixmap size for the mask
+        QSize actualSize = loadedPixmapItem ? loadedPixmapItem->pixmap().size() : QSize();
+        if (maskImage.size() != actualSize || maskImage.isNull()) {
+            maskImage = QImage(actualSize, QImage::Format_ARGB32);
             maskImage.fill(Qt::transparent);
             updateMaskItem();
         }
@@ -875,6 +887,10 @@ void QVGraphicsView::toggleRetouchMode()
         viewport()->setCursor(Qt::ArrowCursor);
         maskImage = QImage();
         updateMaskItem();
+
+        if (qvGetSettingBool(ScalingEnabled) && !isOriginalSize) {
+            expensiveScaleTimerNew->start();
+        }
     }
 }
 
@@ -883,14 +899,19 @@ void QVGraphicsView::paintOnMask(const QPointF &scenePos)
     if (maskImage.isNull() || !loadedPixmapItem)
         return;
 
+    // Map scene coordinates to image relative coordinates (accounting for offset)
     QPointF itemPos = loadedPixmapItem->mapFromScene(scenePos);
+    itemPos -= loadedPixmapItem->offset();
+
+    // Use absolute current scene-to-view scale for consistent brush size
+    qreal viewScale = transform().m11();
 
     if (retouchTool == RetouchTool::Brush) {
         QPainter painter(&maskImage);
         painter.setRenderHint(QPainter::Antialiasing);
         painter.setPen(Qt::NoPen);
         painter.setBrush(Qt::red);
-        painter.drawEllipse(itemPos, brushSize / currentScale, brushSize / currentScale);
+        painter.drawEllipse(itemPos, brushSize / viewScale, brushSize / viewScale);
         painter.end();
     } else if (retouchTool == RetouchTool::Lasso) {
         lassoPolygon << itemPos;
@@ -915,7 +936,8 @@ void QVGraphicsView::finalizeLasso()
 
 void QVGraphicsView::updateMaskItem()
 {
-    if (maskItem) {
+    if (maskItem && loadedPixmapItem) {
+        maskItem->setOffset(loadedPixmapItem->offset());
         if (maskImage.isNull()) {
             maskItem->setPixmap(QPixmap());
         } else {
@@ -929,36 +951,75 @@ void QVGraphicsView::applyRetouch()
     if (maskImage.isNull() || !getCurrentFileDetails().isPixmapLoaded)
         return;
 
-    // Save temporary images
-    QString tempDir = QDir::tempPath();
-    QString inputPath = tempDir + "/qview_retouch_in.png";
-    QString maskPath = tempDir + "/qview_retouch_mask.png";
-    QString outputPath = tempDir + "/qview_retouch_out.png";
+    // 1. Ensure Python environment is ready
+    QString scriptsDir = QCoreApplication::applicationDirPath() + "/scripts";
+    // Check project root if running from build
+    if (!QDir(scriptsDir).exists()) {
+        scriptsDir = "g:/Code/IQView/scripts";
+    }
+    
+    QString venvPath = scriptsDir + "/.venv";
+    QString pythonExe = venvPath + "/Scripts/python.exe"; // Windows path
+#ifndef Q_OS_WIN
+    pythonExe = venvPath + "/bin/python"; // Linux/macOS
+#endif
 
-    // Save current image and mask
-    getLoadedPixmap().save(inputPath);
-    maskImage.save(maskPath);
+    if (!QFile::exists(pythonExe)) {
+        int ret = QMessageBox::information(this, tr("AI Setup"), 
+            tr("This is your first time using Retouch. iqView needs to set up a local AI environment (approx. 500MB).\n\nThis may take a minute. Continue?"), 
+            QMessageBox::Yes | QMessageBox::No);
+        if (ret == QMessageBox::No) return;
 
-    // Call Python script
-    QString scriptPath = QCoreApplication::applicationDirPath() + "/scripts/retoucher.py";
-    // If running from build dir, check project root
-    if (!QFile::exists(scriptPath)) {
-        scriptPath = "g:/Code/IQView/scripts/retoucher.py";
+        QApplication::setOverrideCursor(Qt::WaitCursor);
+        
+        QProcess setup;
+        setup.setWorkingDirectory(scriptsDir);
+        // Try creating venv using system python
+        setup.start("python", QStringList() << "-m" << "venv" << ".venv");
+        if (!setup.waitForStarted() || !setup.waitForFinished(60000)) {
+            setup.start("python3", QStringList() << "-m" << "venv" << ".venv");
+            if (!setup.waitForStarted() || !setup.waitForFinished(60000)) {
+                QApplication::restoreOverrideCursor();
+                QMessageBox::critical(this, tr("Error"), tr("Could not create Python Virtual Environment. Please ensure Python is installed."));
+                return;
+            }
+        }
+
+        // Install requirements
+        setup.start(pythonExe, QStringList() << "-m" << "pip" << "install" << "-r" << "requirements.txt");
+        if (!setup.waitForStarted() || !setup.waitForFinished(300000)) { // 5 min timeout for pip
+            QApplication::restoreOverrideCursor();
+            QMessageBox::critical(this, tr("Error"), tr("Failed to install AI dependencies."));
+            return;
+        }
+        
+        QApplication::restoreOverrideCursor();
+        QMessageBox::information(this, tr("Setup Complete"), tr("AI environment is ready!"));
     }
 
+    // 2. Save temporary images
+    QString tempDir = QDir::tempPath();
+    // Save the oriented pixmap to ensure resolution and rotation match the display
+    QString inputPath = tempDir + "/iqview_retouch_in.png";
+    QString maskPath = tempDir + "/iqview_retouch_mask.png";
+    QString outputPath = tempDir + "/iqview_retouch_out.png";
+
+    undoPixmap = loadedPixmapItem->pixmap();
+    loadedPixmapItem->pixmap().save(inputPath, "PNG");
+    maskImage.save(maskPath);
+
+    // 3. Call Python script from VENV
+    QString scriptPath = scriptsDir + "/retoucher.py";
     QStringList arguments;
     arguments << scriptPath << "--image" << inputPath << "--mask" << maskPath << "--output" << outputPath;
 
-    // Show wait cursor
     QApplication::setOverrideCursor(Qt::WaitCursor);
 
     QProcess *process = new QProcess(this);
     connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, process, outputPath](int exitCode) {
         QApplication::restoreOverrideCursor();
         if (exitCode == 0) {
-            // Load the result
             loadFile(outputPath);
-            // Exit retouch mode
             toggleRetouchMode();
         } else {
             QString error = process->readAllStandardError();
@@ -968,16 +1029,7 @@ void QVGraphicsView::applyRetouch()
         process->deleteLater();
     });
 
-    // Try 'python' then 'python3'
-    process->start("python", arguments);
-    if (!process->waitForStarted()) {
-        process->start("python3", arguments);
-        if (!process->waitForStarted()) {
-             QApplication::restoreOverrideCursor();
-             QMessageBox::critical(this, tr("Error"), tr("Could not start Python. Please ensure Python is installed and in your PATH."));
-             process->deleteLater();
-        }
-    }
+    process->start(pythonExe, arguments);
 }
 
 void QVGraphicsView::changeBrushSize(int delta)
@@ -993,28 +1045,42 @@ void QVGraphicsView::drawForeground(QPainter *painter, const QRectF &rect)
         painter->save();
         painter->setRenderHint(QPainter::Antialiasing);
         
+        qreal viewScale = transform().m11();
+        
         if (retouchTool == RetouchTool::Brush) {
-            painter->setPen(QPen(Qt::white, 2 / currentScale));
+            painter->setPen(QPen(Qt::white, 2 / viewScale));
             painter->setBrush(QColor(255, 0, 0, 100)); // Semi-transparent red
-            painter->drawEllipse(lastMouseScenePos, brushSize / currentScale, brushSize / currentScale);
+            painter->drawEllipse(lastMouseScenePos, brushSize / viewScale, brushSize / viewScale);
         } else if (retouchTool == RetouchTool::Lasso) {
-            painter->setPen(QPen(Qt::white, 2 / currentScale, Qt::DashLine));
+            painter->setPen(QPen(Qt::white, 2 / viewScale, Qt::DashLine));
             painter->setBrush(QColor(255, 0, 0, 50));
             
-            // Map current mouse pos to scene for transient line
             if (isDrawing && !lassoPolygon.isEmpty()) {
                 QPolygonF screenPolygon;
-                for (const QPointF &p : lassoPolygon)
-                    screenPolygon << loadedPixmapItem->mapToScene(p);
+                for (const QPointF &p : lassoPolygon) {
+                    // map from image-relative to scene
+                    screenPolygon << loadedPixmapItem->mapToScene(p + loadedPixmapItem->offset());
+                }
                 screenPolygon << lastMouseScenePos;
                 painter->drawPolygon(screenPolygon);
             } else {
-                // Just a crosshair or something for lasso?
-                painter->setPen(QPen(Qt::white, 1 / currentScale));
-                painter->drawLine(lastMouseScenePos - QPointF(10 / currentScale, 0), lastMouseScenePos + QPointF(10 / currentScale, 0));
-                painter->drawLine(lastMouseScenePos - QPointF(0, 10 / currentScale), lastMouseScenePos + QPointF(0, 10 / currentScale));
+                painter->setPen(QPen(Qt::white, 1 / viewScale));
+                painter->drawLine(lastMouseScenePos - QPointF(10 / viewScale, 0), lastMouseScenePos + QPointF(10 / viewScale, 0));
+                painter->drawLine(lastMouseScenePos - QPointF(0, 10 / viewScale), lastMouseScenePos + QPointF(0, 10 / viewScale));
             }
         }
         painter->restore();
     }
+}
+
+void QVGraphicsView::undoRetouch()
+{
+    if (undoPixmap.isNull()) return;
+    
+    QPixmap current = loadedPixmapItem->pixmap();
+    loadedPixmapItem->setPixmap(undoPixmap);
+    undoPixmap = current;
+    
+    updateMaskItem();
+    viewport()->update();
 }

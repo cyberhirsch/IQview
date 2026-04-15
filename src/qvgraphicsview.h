@@ -49,9 +49,12 @@ public:
     enum class RetouchTool { Off, Brush, Lasso };
     void setPaused(const bool &desiredState);
     void setSpeed(const int &desiredSpeed);
+
+
     void rotateImage(int rotation);
     void toggleRetouchMode();
     void applyRetouch();
+    void undoRetouch();
     void changeBrushSize(int delta);
 
     const QVImageCore::FileDetails &getCurrentFileDetails() const
@@ -67,6 +70,7 @@ signals:
     void fileChanged();
 
     void updatedLoadedPixmapItem();
+    void zoomChanged(qreal factor);
 
 protected:
     void wheelEvent(QWheelEvent *event) override;
@@ -151,6 +155,7 @@ private:
     int brushSize = 50;
     QPointF lastMouseScenePos;
     QPolygonF lassoPolygon;
+    QPixmap undoPixmap;
     void updateMaskItem();
     void paintOnMask(const QPointF &scenePos);
     void finalizeLasso();

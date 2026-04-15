@@ -37,16 +37,20 @@ QVWelcomeDialog::QVWelcomeDialog(QWidget *parent) : QDialog(parent), ui(new Ui::
     QFont font2 = QFont("Lato", 14 + modifier);
     font2.setStyleName("Regular");
     const QString subtitleText =
-            tr("Thank you for downloading qView.<br>Here's a few tips to get you started:");
+            tr("Thank you for downloading iqView.<br>Here's a few tips to get you started:");
     ui->subtitleLabel->setFont(font2);
     ui->subtitleLabel->setText(subtitleText);
 
     // set info font & text
     QFont font3 = QFont("Lato", 12 + modifier);
     font3.setStyleName("Regular");
-    const QString updateText = tr("<ul><li>Right click to access the main menu</li><li>Drag the "
-                                  "image to reposition it</li><li>Scroll to zoom in and "
-                                  "out</li><li>Use arrow keys to switch files</li></ul>");
+    const QString updateText = tr("<ul>"
+                                  "<li>Right click to access the main menu</li>"
+                                  "<li><b>Press R</b> to toggle AI Retouch (Brush/Lasso)</li>"
+                                  "<li>Drag the image to reposition it</li>"
+                                  "<li>Scroll to zoom in and out</li>"
+                                  "<li>Use arrow keys to switch files</li>"
+                                  "</ul>");
     ui->infoLabel->setFont(font3);
     ui->infoLabel->setText(updateText);
 

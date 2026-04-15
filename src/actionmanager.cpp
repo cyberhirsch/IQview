@@ -599,6 +599,8 @@ void ActionManager::actionTriggered(QAction *triggeredAction, MainWindow *releva
         relevantWindow->mirror();
     } else if (key == "flip") {
         relevantWindow->flip();
+    } else if (key == "retouchundo") {
+        relevantWindow->getGraphicsView()->undoRetouch();
     } else if (key == "fullscreen") {
         relevantWindow->toggleFullScreen();
     } else if (key == "firstfile") {
@@ -823,6 +825,11 @@ void ActionManager::initializeActionLibrary()
     cancelRetouchAction->setData({ "disable" });
     cancelRetouchAction->setShortcut(QKeySequence(Qt::Key_Escape));
     actionLibrary.insert("cancelretouch", cancelRetouchAction);
+
+    auto *retouchUndoAction = new QAction(tr("Undo Retouch"));
+    retouchUndoAction->setData({ "disable" });
+    retouchUndoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z));
+    actionLibrary.insert("retouchundo", retouchUndoAction);
 
     auto *increaseBrushAction = new QAction(tr("Increase Brush Size"));
     increaseBrushAction->setData({ "disable" });
