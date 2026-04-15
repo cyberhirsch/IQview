@@ -59,13 +59,13 @@ try {
 New-Item -ItemType Directory -Force -Path bin
 if ($IsWindows) {
     # MSVC generator might put executables in a config-specific subdirectory
-    $exePath = "build/Release/qView.exe"
+    $exePath = "build/Release/iqView.exe"
     if (-not (Test-Path $exePath)) {
-        $exePath = "build/qView.exe"
+        $exePath = "build/iqView.exe"
     }
-    Copy-Item -Path $exePath -Destination "bin/qView.exe" -Force
+    Copy-Item -Path $exePath -Destination "bin/iqView.exe" -Force
 } elseif ($IsMacOS) {
-    Copy-Item -Path "build/qView.app" -Destination "bin/qView.app" -Recurse -Force
+    Copy-Item -Path "build/iqView.app" -Destination "bin/iqView.app" -Recurse -Force
 } else {
-    Copy-Item -Path "build/qview" -Destination "bin/qview" -Force
+    Copy-Item -Path "build/iqview" -Destination "bin/iqview" -Force
 }

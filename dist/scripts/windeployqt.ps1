@@ -37,7 +37,10 @@ $isCrossCompile = $env:buildArch -eq 'Arm64'
 $winDeployQt = $isCrossCompile ? "$(qmake -query QT_HOST_PREFIX)\bin\windeployqt" : "windeployqt"
 $argQtPaths = $isCrossCompile ? "--qtpaths=$env:QT_ROOT_DIR\bin\qtpaths.bat" : $null
 $argForceOpenSsl = $qtVersion -ge [version]'6.8' ? "--force-openssl" : $null
-& $winDeployQt $argQtPaths $argForceOpenSsl --no-compiler-runtime "bin\qView.exe"
+& $winDeployQt $argQtPaths $argForceOpenSsl --no-compiler-runtime "bin\iqView.exe"
+
+# Copy AI scripts
+Copy-Item -Path "scripts" -Destination "bin" -Recurse -Force
 
 $imfDir = "bin\imageformats"
 if ((Test-Path "$imfDir\kimg_tga.dll") -and (Test-Path "$imfDir\qtga.dll")) {
@@ -51,5 +54,5 @@ if ($NightlyVersion -eq '') {
     & "dist/scripts/innomake.ps1"
 } else {
     # Do renaming-y stuff otherwise
-    mv bin\qView.exe "bin\qView-nightly-$NightlyVersion.exe"
+    mv bin\iqView.exe "bin\iqView-nightly-$NightlyVersion.exe"
 }
