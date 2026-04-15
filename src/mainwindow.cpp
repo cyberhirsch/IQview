@@ -904,41 +904,9 @@ QString MainWindow::deleteFileLinuxFallback(const QString &path, bool putBack)
 
 void MainWindow::undoDelete()
 {
-    if (lastDeletedFiles.isEmpty())
-        return;
-
-    const DeletedPaths lastDeletedFile = lastDeletedFiles.pop();
-    if (lastDeletedFile.pathInTrash.isEmpty() || lastDeletedFile.previousPath.isEmpty())
-        return;
-
-#if (QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)) || (defined Q_OS_MACOS && COCOA_LOADED)
-    const QFileInfo fileInfo(lastDeletedFile.pathInTrash);
-    if (!fileInfo.isWritable()) {
-        QMessageBox::critical(this, tr("Error"),
-                              tr("Can't undo deletion of %1:\n"
-                                 "No write permission or file is read-only.")
-                                      .arg(fileInfo.fileName()));
-        return;
-    }
-
-    bool success = QFile::rename(lastDeletedFile.pathInTrash, lastDeletedFile.previousPath);
-    if (!success) {
-        QMessageBox::critical(this, tr("Error"),
-                              tr("Failed undoing deletion of %1.").arg(fileInfo.fileName()));
-    }
-#elif defined Q_OS_UNIX && !defined Q_OS_MACOS
-    deleteFileLinuxFallback(lastDeletedFile.pathInTrash, true);
-#else
-    QMessageBox::critical(this, tr("Not Supported"),
-                          tr("This program was compiled with an old version of Qt and this feature "
-                             "is not available.\n"
-                             "If you see this message, please report a bug!"));
-
-    return;
-#endif
-
-    openFile(lastDeletedFile.previousPath);
-    disableActions();
+    // The user requested that Ctrl+Z does nothing but toggle between retouch in/out.
+    // We explicitly avoid the legacy "Restore from Trash" behavior here.
+    graphicsView->undoRetouch();
 }
 
 void MainWindow::copy()

@@ -698,7 +698,7 @@ void ActionManager::initializeActionLibrary()
     deletePermanentAction->setData({ "disable" });
     actionLibrary.insert("deletepermanent", deletePermanentAction);
 
-    auto *undoAction = new QAction(QIcon::fromTheme("edit-undo"), tr("&Restore from Trash"));
+    auto *undoAction = new QAction(QIcon::fromTheme("edit-undo"), tr("&Compare Retouch"));
 #ifdef Q_OS_WIN
     undoAction->setText(tr("&Undo Delete"));
 #endif
@@ -825,11 +825,6 @@ void ActionManager::initializeActionLibrary()
     cancelRetouchAction->setData({ "disable" });
     cancelRetouchAction->setShortcut(QKeySequence(Qt::Key_Escape));
     actionLibrary.insert("cancelretouch", cancelRetouchAction);
-
-    auto *retouchUndoAction = new QAction(tr("Undo Retouch"));
-    retouchUndoAction->setData({ "disable" });
-    retouchUndoAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Z));
-    actionLibrary.insert("retouchundo", retouchUndoAction);
 
     auto *increaseBrushAction = new QAction(tr("Increase Brush Size"));
     increaseBrushAction->setData({ "disable" });

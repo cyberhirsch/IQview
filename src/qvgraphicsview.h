@@ -8,6 +8,7 @@
 #include <QDir>
 #include <QTimer>
 #include <QFileInfo>
+#include <QProcess>
 
 class QVGraphicsView : public QGraphicsView
 {
@@ -54,7 +55,7 @@ public:
     void rotateImage(int rotation);
     void toggleRetouchMode();
     void applyRetouch();
-    void undoRetouch();
+    bool undoRetouch();
     void changeBrushSize(int delta);
 
     const QVImageCore::FileDetails &getCurrentFileDetails() const
@@ -159,5 +160,12 @@ private:
     void updateMaskItem();
     void paintOnMask(const QPointF &scenePos);
     void finalizeLasso();
+
+    // Persistent AI Worker
+    QProcess *workerProcess = nullptr;
+    bool isWorkerReady = false;
+    void ensureWorkerStarted();
+    void handleWorkerOutput();
+    QString pendingOutputPath;
 };
 #endif // QVGRAPHICSVIEW_H

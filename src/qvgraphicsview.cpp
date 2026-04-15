@@ -1,4 +1,5 @@
 #include "qvgraphicsview.h"
+#include <QThread>
 #include "qvapplication.h"
 #include "qvinfodialog.h"
 #include "qvcocoafunctions.h"
@@ -533,6 +534,9 @@ void QVGraphicsView::makeUnscaled()
     if (flipped)
         scale(1, -1);
 
+    // Reset retouch undo state for the new image
+    undoPixmap = QPixmap();
+
     // Reset transformation
     zoomBasis = transform();
     zoomBasisScaleFactor = 1.0;
@@ -881,6 +885,9 @@ void QVGraphicsView::toggleRetouchMode()
             maskImage.fill(Qt::transparent);
             updateMaskItem();
         }
+        
+        // Eagerly start the AI worker so it's warm by the time the user clicks 'Apply'
+        ensureWorkerStarted();
     } else {
         setDragMode(QGraphicsView::ScrollHandDrag);
         setMouseTracking(false);
@@ -997,39 +1004,76 @@ void QVGraphicsView::applyRetouch()
         QMessageBox::information(this, tr("Setup Complete"), tr("AI environment is ready!"));
     }
 
-    // 2. Save temporary images
-    QString tempDir = QDir::tempPath();
-    // Save the oriented pixmap to ensure resolution and rotation match the display
-    QString inputPath = tempDir + "/iqview_retouch_in.png";
-    QString maskPath = tempDir + "/iqview_retouch_mask.png";
-    QString outputPath = tempDir + "/iqview_retouch_out.png";
+    QString inputPath = QDir::tempPath() + "/iqview_retouch_in.bmp";
+    QString maskPath = QDir::tempPath() + "/iqview_retouch_mask.bmp";
+    QString outputPath = QDir::tempPath() + "/iqview_retouch_out.bmp";
 
     undoPixmap = loadedPixmapItem->pixmap();
-    loadedPixmapItem->pixmap().save(inputPath, "PNG");
-    maskImage.save(maskPath);
+    loadedPixmapItem->pixmap().save(inputPath, "BMP");
+    maskImage.save(maskPath, "BMP");
 
-    // 3. Call Python script from VENV
-    QString scriptPath = scriptsDir + "/retoucher.py";
-    QStringList arguments;
-    arguments << scriptPath << "--image" << inputPath << "--mask" << maskPath << "--output" << outputPath;
+    pendingOutputPath = outputPath;
+    ensureWorkerStarted();
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
+    
+    // Silent Wait: If the worker is still loading, wait up to 20s for the READY signal
+    // without showing a popup. The mouse cursor will indicate work is happening.
+    int retries = 0;
+    while (!isWorkerReady && retries < 200) { // 200 * 100ms = 20s
+        QCoreApplication::processEvents();
+        if (isWorkerReady) break;
+        QThread::msleep(100);
+        retries++;
+    }
 
-    QProcess *process = new QProcess(this);
-    connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), this, [this, process, outputPath](int exitCode) {
+    if (isWorkerReady) {
+        QString command = QString("%1|%2|%3\n").arg(inputPath, maskPath, outputPath);
+        workerProcess->write(command.toUtf8());
+    } else {
         QApplication::restoreOverrideCursor();
-        if (exitCode == 0) {
-            loadFile(outputPath);
-            toggleRetouchMode();
-        } else {
-            QString error = process->readAllStandardError();
-            if (error.isEmpty()) error = process->readAllStandardOutput();
-            QMessageBox::warning(this, tr("Retouch Error"), tr("Retouching failed:\n%1").arg(error));
-        }
-        process->deleteLater();
-    });
+        QMessageBox::critical(this, tr("AI Error"), tr("The AI service failed to start in time."));
+    }
+}
 
-    process->start(pythonExe, arguments);
+void QVGraphicsView::ensureWorkerStarted()
+{
+    if (workerProcess && workerProcess->state() == QProcess::Running) return;
+
+    QString scriptsDir = QCoreApplication::applicationDirPath() + "/scripts";
+    if (!QDir(scriptsDir).exists()) scriptsDir = "g:/Code/IQView/scripts";
+    
+    QString venvPath = scriptsDir + "/.venv";
+    QString pythonExe = venvPath + "/Scripts/python.exe";
+#ifndef Q_OS_WIN
+    pythonExe = venvPath + "/bin/python";
+#endif
+
+    isWorkerReady = false;
+    if (workerProcess) workerProcess->deleteLater();
+    
+    workerProcess = new QProcess(this);
+    connect(workerProcess, &QProcess::readyReadStandardOutput, this, &QVGraphicsView::handleWorkerOutput);
+    workerProcess->start(pythonExe, QStringList() << scriptsDir + "/worker.py");
+}
+
+void QVGraphicsView::handleWorkerOutput()
+{
+    while (workerProcess->canReadLine()) {
+        QString line = QString::fromUtf8(workerProcess->readLine()).trimmed();
+        if (line == "READY") {
+            isWorkerReady = true;
+        } else if (line == "DONE") {
+            QApplication::restoreOverrideCursor();
+            loadFile(pendingOutputPath);
+            // Toggle retouch mode off on success
+            retouchTool = RetouchTool::Lasso; // Setup for the toggle to hit Off
+            toggleRetouchMode();
+        } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
+            QApplication::restoreOverrideCursor();
+            QMessageBox::warning(this, tr("Retouch Error"), line);
+        }
+    }
 }
 
 void QVGraphicsView::changeBrushSize(int delta)
@@ -1073,9 +1117,9 @@ void QVGraphicsView::drawForeground(QPainter *painter, const QRectF &rect)
     }
 }
 
-void QVGraphicsView::undoRetouch()
+bool QVGraphicsView::undoRetouch()
 {
-    if (undoPixmap.isNull()) return;
+    if (undoPixmap.isNull()) return false;
     
     QPixmap current = loadedPixmapItem->pixmap();
     loadedPixmapItem->setPixmap(undoPixmap);
@@ -1083,4 +1127,5 @@ void QVGraphicsView::undoRetouch()
     
     updateMaskItem();
     viewport()->update();
+    return true;
 }

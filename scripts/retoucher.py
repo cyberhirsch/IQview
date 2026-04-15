@@ -4,6 +4,8 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 import sys
+import time
+from PIL import Image, ImageFilter
 
 def log(msg, log_path):
     with open(log_path, "a") as f:
@@ -91,8 +93,23 @@ def main():
             return
 
     log(f"Using model: {model_path}", log_path)
-    providers = ['CUDAExecutionProvider', 'CPUExecutionProvider']
-    session = ort.InferenceSession(model_path, providers=providers)
+    
+    start_load = time.time()
+    
+    # Dynamically select only available providers to avoid warnings
+    available = ort.get_available_providers()
+    requested = ['DmlExecutionProvider', 'CUDAExecutionProvider']
+    providers = [p for p in requested if p in available] + ['CPUExecutionProvider']
+    
+    # Session options to silence all debug/telemetry output
+    sess_options = ort.SessionOptions()
+    sess_options.log_severity_level = 3 # 3 = Error only
+    sess_options.enable_mem_pattern = False # Often helps with DirectML stability
+    
+    session = ort.InferenceSession(model_path, providers=providers, sess_options=sess_options)
+    load_time = time.time() - start_load
+    
+    log(f"Model loaded in {load_time:.3f}s. Active Providers: {session.get_providers()}", log_path)
     
     # Log model metadata for debugging
     for i, inp in enumerate(session.get_inputs()):
@@ -126,10 +143,25 @@ def main():
         session.get_inputs()[1].name: t_mask
     }
     
-    # Inference
+    # Inference with auto-fallback
     log("Running inference...", log_path)
-    output_raw = session.run(None, inputs)[0]
-    log(f"Inference complete. Raw Output stats: min={output_raw.min():.3f}, max={output_raw.max():.3f}, mean={output_raw.mean():.3f}", log_path)
+    try:
+        start_inf = time.time()
+        output_raw = session.run(None, inputs)[0]
+        inf_time = time.time() - start_inf
+        log(f"Inference complete in {inf_time:.3f}s.", log_path)
+    except Exception as e:
+        log(f"RET_WARN: GPU inference failed, falling back to CPU. Error: {e}", log_path)
+        # Force CPU session
+        try:
+            cpu_session = ort.InferenceSession(model_path, providers=['CPUExecutionProvider'], sess_options=sess_options)
+            start_inf = time.time()
+            output_raw = cpu_session.run(None, inputs)[0]
+            inf_time = time.time() - start_inf
+            log(f"CPU Fallback Inference complete in {inf_time:.3f}s.", log_path)
+        except Exception as e2:
+            log(f"RET_ERR: Second-stage fallback failed: {e2}", log_path)
+            sys.exit(1)
     
     # Handle range 0-1 vs 0-255
     res = output_raw[0]
