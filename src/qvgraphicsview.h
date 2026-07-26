@@ -184,11 +184,6 @@ private:
     int fluxBatchExpected = 1;
     QStringList fluxBatchResults;
     void finishFluxBatch();
-
-    // Turn a SAM 3 segment selection into a retouch mask, so the segments can
-    // feed the LaMa / Flux pipelines.
-    bool buildMaskFromSegments(const QString &idMapPath, const QSet<int> &segments);
-    void shutdownIsolateWorker();
     void updateMaskItem();
     void paintOnMask(const QPointF &scenePos);
     void finalizeLasso();
@@ -219,8 +214,8 @@ private:
     QString fluxLoadedModelId;
     class RetouchPromptBar *promptBar = nullptr;
 
-    // Isolate
-    enum class IsolateState { Idle, WaitingForSegments, WaitingForCompose };
+    // Isolate — SAM 3 background removal (subject cutout)
+    enum class IsolateState { Idle, WaitingForResult };
     void ensureIsolateStarted();
     void handleIsolateOutput();
 

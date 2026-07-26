@@ -65,7 +65,6 @@ set(PROJECT_SOURCES
     src/shortcutmanager.cpp
     src/hfauthdialog.cpp
     src/retouchpromptbar.cpp
-    src/isolatedialog.cpp
     src/ailogdialog.cpp
     src/variantdialog.cpp
 )
@@ -88,7 +87,6 @@ set(PROJECT_HEADERS
     src/shortcutmanager.h
     src/hfauthdialog.h
     src/retouchpromptbar.h
-    src/isolatedialog.h
     src/ailogdialog.h
     src/variantdialog.h
 )

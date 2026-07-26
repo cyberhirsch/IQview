@@ -5,10 +5,10 @@ print("STATUS: Starting segmentation worker...", flush=True)
 import os
 import argparse
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageFilter
 import torch
 print("STATUS: Loading segmentation libraries...", flush=True)
-from transformers import pipeline as hf_pipeline
+from transformers import Sam3Model, Sam3Processor
 from huggingface_hub import login
 from huggingface_hub import model_info as hf_model_info
 from huggingface_hub.utils import GatedRepoError, RepositoryNotFoundError
@@ -16,45 +16,16 @@ print("STATUS: Libraries loaded.", flush=True)
 
 SAM3_MODEL_ID = "facebook/sam3"
 
+# Fixed concept prompt for the subject cutout. SAM 3 is a text/box-prompted
+# concept detector, not an automatic "segment everything" model — generic
+# words like "object" or "thing" find nothing, but "background" reliably
+# identifies the surrounding scene as a single concept (verified against
+# both synthetic and photographic test images).
+BACKGROUND_PROMPT = "background"
+
 # Fail fast on stalled connections instead of hanging forever; the retry loop
 # in _download_model picks up where the partial file left off.
 os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "30")
-
-# Distinct vibrant colors for up to 32 segments
-SEGMENT_COLORS = [
-    (255,  59,  48),   #  1 red
-    (  0, 122, 255),   #  2 blue
-    ( 52, 199,  89),   #  3 green
-    (255, 149,   0),   #  4 orange
-    (175,  82, 222),   #  5 purple
-    (255,  45,  85),   #  6 pink
-    ( 90, 200, 250),   #  7 cyan
-    (255, 204,   0),   #  8 yellow
-    (162, 132,  94),   #  9 brown
-    ( 88,  86, 214),   # 10 indigo
-    ( 48, 209, 163),   # 11 mint
-    (255,  99,  48),   # 12 coral
-    (100, 210, 255),   # 13 sky
-    (191,  90, 242),   # 14 violet
-    ( 50, 173, 230),   # 15 azure
-    (255, 179,  64),   # 16 amber
-    (255,  55, 148),   # 17 magenta
-    (  0, 199, 190),   # 18 turquoise
-    (255, 214,  10),   # 19 gold
-    (142, 142, 147),   # 20 gray
-    (174, 214, 241),   # 21 light blue
-    (171, 235, 198),   # 22 light green
-    (250, 215, 160),   # 23 peach
-    (215, 189, 226),   # 24 lavender
-    (245, 183, 177),   # 25 salmon
-    (210, 180, 140),   # 26 tan
-    (152, 255, 152),   # 27 lime
-    (255, 128,   0),   # 28 dark orange
-    (  0, 150, 136),   # 29 teal
-    (233,  30,  99),   # 30 deep pink
-    ( 63,  81, 181),   # 31 dark blue
-    (139, 195,  74),   # 32 light green 2
-]
 
 
 def check_access(token=None):
@@ -142,9 +113,10 @@ def _download_model(token=None):
 
 class IsolateWorker:
     def __init__(self, token=None):
-        self.pipe   = None
+        self.model  = None
+        self.processor = None
         self.token  = token
-        self._masks = []   # list of (H, W) bool numpy arrays, one per segment
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
 
     def _load_model(self):
         if self.token:
@@ -152,100 +124,50 @@ class IsolateWorker:
         print("STATUS: Checking SAM 3 weights (~3.2 GB on first run)...", flush=True)
         _download_model(self.token)
         print("STATUS: Loading SAM 3 model...", flush=True)
-        device = 0 if torch.cuda.is_available() else "cpu"
-        self.pipe = hf_pipeline(
-            "mask-generation",
-            model=SAM3_MODEL_ID,
-            device=device,
-            token=self.token or None,
-        )
+        # Load the concept-segmentation model directly rather than through
+        # AutoModel/pipeline resolution, which for this repo resolves to the
+        # unrelated Sam3VideoModel architecture (video tracking) and loads
+        # with hundreds of randomly-initialized weights.
+        self.model = Sam3Model.from_pretrained(SAM3_MODEL_ID, token=self.token or None).to(self.device).eval()
+        self.processor = Sam3Processor.from_pretrained(SAM3_MODEL_ID, token=self.token or None)
         print("STATUS: SAM 3 ready.", flush=True)
 
-    def segment(self, image_path, viz_path, idmap_path):
-        """Segment image, write colorized viz + 8-bit id map. Returns segment count."""
+    def remove_background(self, image_path, output_path):
+        """Cut the subject out of the background using SAM 3's text-prompted
+        concept segmentation, and save an RGBA PNG with the background made
+        transparent."""
         image = Image.open(image_path).convert("RGB")
         W, H = image.size
 
-        # Scale to max 1024 px on the longer side to keep inference fast
-        scale = min(1.0, 1024.0 / max(W, H))
-        run_w = max(8, round(W * scale / 8) * 8)
-        run_h = max(8, round(H * scale / 8) * 8)
-        run_image = image.resize((run_w, run_h), Image.LANCZOS) if scale < 1.0 else image
-
-        print("STATUS: Segmenting image with SAM 3...", flush=True)
-        if self.pipe is None:
+        print("STATUS: Removing background with SAM 3...", flush=True)
+        if self.model is None:
             self._load_model()
 
-        outputs = self.pipe(run_image, points_per_batch=64)
-        raw_masks = outputs.get("masks", [])
+        inputs = self.processor(images=image, text=BACKGROUND_PROMPT, return_tensors="pt").to(self.device)
+        with torch.no_grad():
+            outputs = self.model(**inputs)
+        results = self.processor.post_process_instance_segmentation(
+            outputs, threshold=0.3, target_sizes=[(H, W)])[0]
 
-        # Normalize mask format (some versions return list of dicts)
-        if raw_masks and isinstance(raw_masks[0], dict):
-            raw_masks = [m["segmentation"] for m in raw_masks]
+        masks = results.get("masks", [])
+        if len(masks) == 0:
+            raise RuntimeError("Could not find a clear background region in this image.")
 
-        # Sort smallest-area first so specific (small) segments take priority when
-        # assigning non-overlapping pixels
-        raw_masks = sorted(raw_masks, key=lambda m: np.asarray(m).sum())
+        # Background can be reported as several instances (e.g. sky + floor
+        # counted separately) — union them into one background mask.
+        background = np.zeros((H, W), dtype=bool)
+        for m in masks:
+            background |= np.asarray(m.cpu() if hasattr(m, "cpu") else m, dtype=bool)
 
-        # Build non-overlapping label map (0 = background/unassigned)
-        label_map = np.zeros((run_h, run_w), dtype=np.uint8)
-        min_area = max(100, run_w * run_h // 500)   # ignore tiny noise masks
-        n = 0
+        # Keep the subject (everything that ISN'T background); feather the
+        # cutout edge a couple of pixels to avoid a jagged/aliased silhouette.
+        subject_alpha = Image.fromarray((~background).astype(np.uint8) * 255, mode="L")
+        subject_alpha = subject_alpha.filter(ImageFilter.GaussianBlur(2))
 
-        for raw in raw_masks:
-            mask = np.asarray(raw, dtype=bool)
-            if mask.shape != (run_h, run_w):
-                continue
-            # Only claim pixels that aren't yet assigned
-            unassigned = (label_map == 0) & mask
-            if unassigned.sum() < min_area:
-                continue
-            n += 1
-            if n > len(SEGMENT_COLORS):
-                break
-            label_map[unassigned] = n
-
-        # Scale label map back to original image resolution
-        if scale < 1.0:
-            from PIL import Image as _PIL
-            lbl_pil = _PIL.fromarray(label_map, mode='L').resize((W, H), Image.NEAREST)
-            label_map = np.array(lbl_pil)
-
-        # Store per-segment boolean masks at original resolution
-        self._masks = [(label_map == i) for i in range(1, n + 1)]
-
-        # Save id map
-        Image.fromarray(label_map).save(idmap_path)
-
-        # Build colorized visualization
-        img_np = np.array(image, dtype=np.uint8)
-        overlay = np.zeros_like(img_np)
-        for i, color in enumerate(SEGMENT_COLORS[:n], start=1):
-            overlay[label_map == i] = color
-
-        # 55% color, 45% original for segments; 50% darkness for unclassified
-        result = (0.55 * overlay + 0.45 * img_np).clip(0, 255).astype(np.uint8)
-        result[label_map == 0] = (img_np[label_map == 0] * 0.45).astype(np.uint8)
-        Image.fromarray(result).save(viz_path)
-
-        print(f"STATUS: Found {n} segments.", flush=True)
-        return n
-
-    def compose(self, image_path, selected_ids, output_path):
-        """Combine selected segment masks into a PNG with alpha transparency."""
-        image = Image.open(image_path).convert("RGBA")
-        W, H = image.size
-
-        alpha = np.zeros((H, W), dtype=np.uint8)
-        for idx in selected_ids:
-            if 0 <= idx < len(self._masks):
-                m = self._masks[idx]
-                if m.shape == (H, W):
-                    alpha[m] = 255
-
-        result = np.array(image, dtype=np.uint8)
-        result[:, :, 3] = alpha
-        Image.fromarray(result).save(output_path)
+        rgba = image.convert("RGBA")
+        rgba.putalpha(subject_alpha)
+        rgba.save(output_path)
+        print(f"OUTPUT: {output_path}", flush=True)
 
 
 def main():
@@ -277,18 +199,9 @@ def main():
             parts = line.strip().split("|")
             cmd = parts[0] if parts else ""
 
-            if cmd == "SEGMENT" and len(parts) >= 4:
-                image_path, viz_path, idmap_path = parts[1], parts[2], parts[3]
-                n = worker.segment(image_path, viz_path, idmap_path)
-                print(f"SEGMENTS: {n}", flush=True)
-
-            elif cmd == "COMPOSE" and len(parts) >= 4:
-                image_path = parts[1]
-                ids_str    = parts[2]
-                output_path = parts[3]
-                selected = [int(x) for x in ids_str.split(",") if x.strip().isdigit()]
-                worker.compose(image_path, selected, output_path)
-                print(f"OUTPUT: {output_path}", flush=True)
+            if cmd == "REMOVE_BG" and len(parts) >= 3:
+                image_path, output_path = parts[1], parts[2]
+                worker.remove_background(image_path, output_path)
 
             else:
                 if cmd:

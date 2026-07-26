@@ -16,7 +16,7 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 ## 🛠 AI Features
 - **Object Removal (R)** — *LaMa inpainting*: mask distracting objects, text, or photobombers and they vanish in a fraction of a second. Brush and lasso masking tools included.
 - **Creative Fill (G)** — *FLUX.2 klein*: mask a region, type a prompt, and generate photo-real replacement content in seconds.
-- **Isolate (S)** — *SAM 3 segmentation*: automatically segment the image, pick the segments to keep, and get a transparent-background cutout.
+- **Isolate (S)** — *SAM 3*: one-click subject cutout — removes the background and gives you a transparent PNG.
 - **Zero Configuration**: the Python environment and AI models are set up and downloaded automatically on first use.
 - **Privacy First**: all AI processing happens locally on your machine — your photos never leave your computer. (Gated models like FLUX and SAM 3 require a free Hugging Face token to download weights.)
 
@@ -25,7 +25,7 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 | --- | --- | --- |
 | **R** | Toggle Retouch Mode (Cycle: Brush -> Lasso -> Off) / Apply if masked | LaMa |
 | **G** | Creative Fill: mask + prompt | FLUX.2 klein |
-| **S** | Isolate: segment and cut out subjects | SAM 3 |
+| **S** | Isolate: remove the background | SAM 3 |
 | **Enter** | Apply Retouch / Confirm | - |
 | **Esc** | Cancel / Exit Mode | - |
 | **Middle Click** | Apply Retouch (Quick Action) | - |
