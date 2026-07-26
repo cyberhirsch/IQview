@@ -1749,28 +1749,62 @@ void QVGraphicsView::handleIsolateOutput()
             QString idMapPath = QDir(tempDir).filePath("iqview_isolate_ids.png");
 
             IsolateDialog dlg(vizPath, idMapPath, n, this);
-            if (dlg.exec() == QDialog::Accepted) {
-                QSet<int> selected = dlg.selectedSegments();
-                if (!selected.isEmpty()) {
-                    isolateState = IsolateState::WaitingForCompose;
+            const bool accepted = dlg.exec() == QDialog::Accepted;
+            const QSet<int> selected = dlg.selectedSegments();
 
-                    QString outputPath = uniqueAiOutputPath(
-                            "iqview_isolate_out", "png",
-                            getCurrentFileDetails().fileInfo.absoluteFilePath());
-                    QStringList ids;
-                    for (int id : selected) ids << QString::number(id);
-
-                    showAiStatus(tr("Compositing selection..."));
-                    QApplication::setOverrideCursor(Qt::WaitCursor);
-                    QString cmd = QString("COMPOSE|%1|%2|%3\n")
-                                      .arg(isolateInputPath, ids.join(","), outputPath);
-                    isolateProcess->write(cmd.toUtf8());
-                } else {
-                    isolateState = IsolateState::Idle;
-                }
-            } else {
+            if (!accepted || selected.isEmpty()) {
                 isolateState = IsolateState::Idle;
+                break;
             }
+
+            if (dlg.chosenAction() == IsolateDialog::Action::RemoveBackground) {
+                isolateState = IsolateState::WaitingForCompose;
+
+                QString outputPath = uniqueAiOutputPath(
+                        "iqview_isolate_out", "png",
+                        getCurrentFileDetails().fileInfo.absoluteFilePath());
+                QStringList ids;
+                for (int id : selected) ids << QString::number(id);
+
+                showAiStatus(tr("Compositing selection..."));
+                QApplication::setOverrideCursor(Qt::WaitCursor);
+                QString cmd = QString("COMPOSE|%1|%2|%3\n")
+                                  .arg(isolateInputPath, ids.join(","), outputPath);
+                isolateProcess->write(cmd.toUtf8());
+                break;
+            }
+
+            // Remove Object / Inpaint Segment: turn the selection into a mask
+            // and hand off to LaMa or Flux.
+            isolateState = IsolateState::Idle;
+            if (!buildMaskFromSegments(idMapPath, selected)) {
+                QMessageBox::warning(this, tr("Isolate"),
+                                     tr("Could not build a mask from the selected segments."));
+                break;
+            }
+
+            // Show the mask overlay without resetting it (toggleRetouchMode would
+            // allocate a fresh empty mask).
+            retouchTool = RetouchTool::Brush;
+            setDragMode(QGraphicsView::NoDrag);
+            setMouseTracking(true);
+            viewport()->setMouseTracking(true);
+            viewport()->setCursor(Qt::CrossCursor);
+            updateMaskItem();
+
+            // SAM 3 is holding several GB of VRAM that LaMa/Flux are about to need.
+            shutdownIsolateWorker();
+
+            if (dlg.chosenAction() == IsolateDialog::Action::RemoveObject) {
+                applyRetouch();
+            } else if (promptBar) {
+                // Creative Fill: reveal the prompt bar and wait for the user to
+                // describe the replacement, then press Generate.
+                promptBar->show();
+                repositionPromptBar();
+                QTimer::singleShot(0, promptBar, [this]() { promptBar->setFocusToPrompt(); });
+            }
+            return;   // isolateProcess is gone; stop reading from it
 
         } else if (line.startsWith("OUTPUT: ")
                    && isolateState == IsolateState::WaitingForCompose) {
@@ -1804,6 +1838,58 @@ void QVGraphicsView::handleIsolateOutput()
             }
         }
     }
+}
+
+// Paint the chosen SAM 3 segments into maskImage, matching what the brush
+// produces (opaque red on transparent) so both the LaMa and Flux paths read it
+// correctly. `segments` holds 0-based indices; the id map stores 1..N.
+bool QVGraphicsView::buildMaskFromSegments(const QString &idMapPath, const QSet<int> &segments)
+{
+    QImage idMap(idMapPath);
+    if (idMap.isNull() || segments.isEmpty())
+        return false;
+
+    if (idMap.format() != QImage::Format_Grayscale8)
+        idMap = idMap.convertToFormat(QImage::Format_Grayscale8);
+
+    QImage mask(idMap.size(), QImage::Format_ARGB32);
+    mask.fill(Qt::transparent);
+
+    const QRgb painted = qRgba(255, 0, 0, 255);
+    bool any = false;
+    for (int y = 0; y < idMap.height(); ++y) {
+        const uchar *src = idMap.constScanLine(y);
+        auto *dst = reinterpret_cast<QRgb *>(mask.scanLine(y));
+        for (int x = 0; x < idMap.width(); ++x) {
+            if (src[x] > 0 && segments.contains(static_cast<int>(src[x]) - 1)) {
+                dst[x] = painted;
+                any = true;
+            }
+        }
+    }
+    if (!any)
+        return false;
+
+    // The displayed pixmap may have been rescaled since the segmentation ran.
+    const QSize target = loadedPixmapItem->pixmap().size();
+    if (mask.size() != target)
+        mask = mask.scaled(target, Qt::IgnoreAspectRatio, Qt::FastTransformation);
+
+    maskImage = mask;
+    maskHasPaint = true;
+    return true;
+}
+
+// SAM 3 holds several GB of VRAM; free it before handing off to LaMa or Flux.
+void QVGraphicsView::shutdownIsolateWorker()
+{
+    if (!isolateProcess)
+        return;
+    isolateProcess->disconnect(this);
+    isolateProcess->kill();
+    isolateProcess->waitForFinished(3000);
+    isolateProcess->deleteLater();
+    isolateProcess = nullptr;
 }
 
 void QVGraphicsView::applyIsolate()

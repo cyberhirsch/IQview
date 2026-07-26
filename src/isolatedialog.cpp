@@ -178,8 +178,7 @@ IsolateDialog::IsolateDialog(const QString &vizPath,
 
     // Instruction banner
     auto *hint = new QLabel(
-        tr("Click segments to toggle selection. Selected segments will be kept; "
-           "everything else becomes transparent."), this);
+        tr("Click segments to toggle selection, then choose what to do with them."), this);
     hint->setWordWrap(true);
     hint->setStyleSheet("color: #aaa; font-size: 12px;");
     root->addWidget(hint);
@@ -208,14 +207,44 @@ IsolateDialog::IsolateDialog(const QString &vizPath,
     btnRow->addWidget(invBtn);
     btnRow->addStretch();
 
-    m_okBtn = new QPushButton(tr("Apply"), this);
-    m_okBtn->setDefault(true);
     auto *cancelBtn = new QPushButton(tr("Cancel"), this);
-    connect(m_okBtn,    &QPushButton::clicked, this, &QDialog::accept);
     connect(cancelBtn, &QPushButton::clicked, this, &QDialog::reject);
     btnRow->addWidget(cancelBtn);
-    btnRow->addWidget(m_okBtn);
     root->addLayout(btnRow);
+
+    // Action row — each button records what to do, then accepts.
+    auto *actionRow = new QHBoxLayout;
+    actionRow->addStretch();
+
+    const struct
+    {
+        Action action;
+        QString label;
+        QString tip;
+    } actions[] = {
+        { Action::RemoveBackground, tr("Remove Background"),
+          tr("Keep the selected segments; everything else becomes transparent.") },
+        { Action::RemoveObject, tr("Remove Object"),
+          tr("Erase the selected segments and fill them in from the surrounding "
+             "image (LaMa).") },
+        { Action::InpaintSegment, tr("Inpaint Segment..."),
+          tr("Replace the selected segments with something you describe (Flux).") },
+    };
+
+    for (const auto &spec : actions) {
+        auto *button = new QPushButton(spec.label, this);
+        button->setToolTip(spec.tip);
+        button->setEnabled(false);
+        const Action action = spec.action;
+        connect(button, &QPushButton::clicked, this, [this, action]() {
+            m_action = action;
+            accept();
+        });
+        m_actionButtons << button;
+        actionRow->addWidget(button);
+    }
+    m_actionButtons.first()->setDefault(true);
+    root->addLayout(actionRow);
 
     // Wire selection changes
     connect(m_view, &SegmentView::selectionChanged,
@@ -242,5 +271,6 @@ QSet<int> IsolateDialog::selectedSegments() const
 void IsolateDialog::onSelectionChanged(int selected, int total)
 {
     m_status->setText(tr("%1 of %2 segments selected").arg(selected).arg(total));
-    m_okBtn->setEnabled(selected > 0);
+    for (auto *button : m_actionButtons)
+        button->setEnabled(selected > 0);
 }

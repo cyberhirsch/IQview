@@ -58,6 +58,14 @@ class IsolateDialog : public QDialog
     Q_OBJECT
 
 public:
+    // What to do with the selected segments once the dialog is accepted.
+    enum class Action {
+        None,             // cancelled
+        RemoveBackground, // keep the selection, everything else transparent
+        RemoveObject,     // erase the selection and fill it in (LaMa)
+        InpaintSegment,   // replace the selection from a prompt (Flux)
+    };
+
     explicit IsolateDialog(const QString &vizPath,
                            const QString &idMapPath,
                            int            segmentCount,
@@ -66,10 +74,13 @@ public:
     // Returns selected segment indices (0-based, as expected by IsolateWorker).
     QSet<int> selectedSegments() const;
 
+    Action chosenAction() const { return m_action; }
+
 private:
     SegmentView *m_view    = nullptr;
     QLabel      *m_status  = nullptr;
-    QPushButton *m_okBtn   = nullptr;
+    QList<QPushButton *> m_actionButtons;
+    Action m_action = Action::None;
 
     void onSelectionChanged(int selected, int total);
 };
