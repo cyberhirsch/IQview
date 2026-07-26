@@ -290,6 +290,7 @@ void QVOptionsDialog::syncSettings(bool defaults, bool makeConnections)
     }
     // --- AI: Generate — Sources ---
     syncRadioButtons({ui->fluxDistilledRadio, ui->fluxBaseRadio}, "hfusebasemodel", defaults, makeConnections);
+    syncSpinBox(ui->fluxBatchCountSpinBox, "fluxbatchcount", defaults, makeConnections);
     syncLineEdit(ui->hfModelIdLineEdit, "hfmodelid", defaults, makeConnections);
     syncLineEdit(ui->hfVaeLineEdit, "hfvaefile", defaults, makeConnections);
     syncLineEdit(ui->hfTextEncLineEdit, "hftextencfile", defaults, makeConnections);

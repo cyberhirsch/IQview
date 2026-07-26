@@ -62,7 +62,8 @@ public:
         LamaModelPath,
         FluxTransformerPath,
         FluxVaePath,
-        FluxTextEncPath
+        FluxTextEncPath,
+        FluxBatchCount
     };
     Q_ENUM(Setting)
 

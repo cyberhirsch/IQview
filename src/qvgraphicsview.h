@@ -178,6 +178,12 @@ private:
     QString pendingEditedSource;
     QString editedSource;
     void beginAiResultLoad(const QString &outputPath);
+
+    // Batch Creative Fill: results accumulate here until the worker reports
+    // BATCH_DONE, then the user picks one.
+    int fluxBatchExpected = 1;
+    QStringList fluxBatchResults;
+    void finishFluxBatch();
     void updateMaskItem();
     void paintOnMask(const QPointF &scenePos);
     void finalizeLasso();

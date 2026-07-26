@@ -66,7 +66,8 @@ static const SettingDefinition settingDefinitions[] = {
     { SettingsManager::Setting::LamaModelPath, "", "lamamodelpath" },
     { SettingsManager::Setting::FluxTransformerPath, "", "fluxtransformerpath" },
     { SettingsManager::Setting::FluxVaePath, "", "fluxvaepath" },
-    { SettingsManager::Setting::FluxTextEncPath, "", "fluxtextencpath" }
+    { SettingsManager::Setting::FluxTextEncPath, "", "fluxtextencpath" },
+    { SettingsManager::Setting::FluxBatchCount, 1, "fluxbatchcount" }
 };
 
 // settingKeys is a file-static variable, it doesn't need to be a member

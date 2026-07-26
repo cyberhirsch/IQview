@@ -1,6 +1,7 @@
 #include "qvgraphicsview.h"
 #include "ailogdialog.h"
 #include "isolatedialog.h"
+#include "variantdialog.h"
 #include <QThread>
 #include "hfauthdialog.h"
 #include "retouchpromptbar.h"
@@ -1501,8 +1502,16 @@ void QVGraphicsView::handleFluxOutput()
         if (line.startsWith("STATUS: ")) {
             showAiStatus(line.mid(8));
         } else if (line.startsWith("OUTPUT: ")) {
+            const QString outputPath = line.mid(8).trimmed();
+
+            // In a batch, collect results and wait for BATCH_DONE before asking
+            // the user to choose.
+            if (fluxBatchExpected > 1) {
+                fluxBatchResults << outputPath;
+                continue;
+            }
+
             hideAiStatus();
-            QString outputPath = line.mid(8).trimmed();
             // Capture the current (original) pixmap for undo before loadFile replaces it.
             undoPixmap = loadedPixmapItem->pixmap();
             // Load result into imageCore — same as the LaMa pipeline does.
@@ -1511,12 +1520,49 @@ void QVGraphicsView::handleFluxOutput()
             beginAiResultLoad(outputPath);
             exitRetouchMode();
             QApplication::restoreOverrideCursor();
+
+        } else if (line.startsWith("BATCH_DONE")) {
+            finishFluxBatch();
         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
             hideAiStatus();
+            fluxBatchExpected = 1;
+            fluxBatchResults.clear();
             QApplication::restoreOverrideCursor();
             QMessageBox::warning(this, tr("Generate Error"), line.mid(line.indexOf(':') + 1).trimmed());
         }
     }
+}
+
+// All variants of a batch generation have arrived — let the user pick one,
+// then discard the rest.
+void QVGraphicsView::finishFluxBatch()
+{
+    hideAiStatus();
+    QApplication::restoreOverrideCursor();
+
+    const QStringList results = fluxBatchResults;
+    fluxBatchResults.clear();
+    fluxBatchExpected = 1;
+
+    if (results.isEmpty())
+        return;
+
+    VariantDialog dialog(results, this);
+    const bool accepted = dialog.exec() == QDialog::Accepted;
+    const QString chosen = accepted ? dialog.selectedPath() : QString();
+
+    // Remove the variants that weren't chosen so they don't pile up in temp.
+    for (const QString &path : results) {
+        if (path != chosen)
+            QFile::remove(path);
+    }
+
+    if (chosen.isEmpty())
+        return;   // cancelled — leave the original image untouched
+
+    undoPixmap = loadedPixmapItem->pixmap();
+    beginAiResultLoad(chosen);
+    exitRetouchMode();
 }
 
 void QVGraphicsView::applyCreativeFill()
@@ -1575,7 +1621,13 @@ void QVGraphicsView::applyCreativeFill()
 
     QApplication::setOverrideCursor(Qt::WaitCursor);
 
-    QString cmd = QString("%1|%2|%3|%4\n").arg(inputPath, maskPath, prompt, outputPath);
+    const int batchCount = qBound(1, qvGetSettingInt(FluxBatchCount), 8);
+    fluxBatchExpected = batchCount;
+    fluxBatchResults.clear();
+
+    QString cmd = QString("%1|%2|%3|%4|%5\n")
+                          .arg(inputPath, maskPath, prompt, outputPath)
+                          .arg(batchCount);
     fluxProcess->write(cmd.toUtf8());
 }
 

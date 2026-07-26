@@ -258,7 +258,10 @@ class FluxWorker:
             transformer=transformer,
         )
 
-    def process(self, image_path, mask_path, prompt, output_path):
+    def process(self, image_path, mask_path, prompt, output_path, count=1):
+        """Generate `count` variations. Each is written next to output_path with
+        a -N suffix (except a single result, which uses output_path as given),
+        and reported with its own OUTPUT: line."""
         image = Image.open(image_path).convert("RGB")
         mask  = Image.open(mask_path).convert("L")
 
@@ -288,45 +291,70 @@ class FluxWorker:
             mask_t = torch.from_numpy(mask_np.astype(np.float32) / 255.0)
             self.pipe._inpaint_mask = mask_t.unsqueeze(0).unsqueeze(0)  # (1,1,H,W)
 
-        print(f"STATUS: Generating ({num_steps} steps)...", flush=True)
+        # Feather the mask once (dilate, then blur) so the composite seam fades over
+        # ~15 px instead of a 1-px hard edge — same treatment as the LaMa blend in
+        # worker.py. Dilating first keeps alpha at 1.0 across the whole painted mask,
+        # so the fade happens over generated content just outside it (which matches
+        # the original anyway).
+        from PIL import ImageFilter
+        feathered = mask.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(6))
+        alpha = np.array(feathered).astype(float) / 255.0
+        alpha = alpha[..., np.newaxis]   # H×W×1 for broadcasting
 
-        def _progress(pipe_ref, step_index, timestep, callback_kwargs):
-            print(f"STATUS: Generating... step {step_index + 1}/{num_steps}", flush=True)
-            return callback_kwargs
+        base, ext = os.path.splitext(output_path)
 
         try:
-            result = self.pipe(
-                prompt=prompt,
-                image=image,
-                height=out_h,
-                width=out_w,
-                num_inference_steps=num_steps,
-                guidance_scale=guidance,
-                max_sequence_length=256,
-                callback_on_step_end=_progress,
-            ).images[0]
+            for i in range(count):
+                if count > 1:
+                    print(f"STATUS: Generating variant {i + 1}/{count} ({num_steps} steps)...",
+                          flush=True)
+                else:
+                    print(f"STATUS: Generating ({num_steps} steps)...", flush=True)
+
+                def _progress(pipe_ref, step_index, timestep, callback_kwargs, _i=i):
+                    if count > 1:
+                        print(f"STATUS: Variant {_i + 1}/{count} — step "
+                              f"{step_index + 1}/{num_steps}", flush=True)
+                    else:
+                        print(f"STATUS: Generating... step {step_index + 1}/{num_steps}",
+                              flush=True)
+                    return callback_kwargs
+
+                # A distinct seed per variant; without it a distilled model returns
+                # essentially the same image every time.
+                generator = torch.Generator(device="cpu").manual_seed(
+                    torch.randint(0, 2**31 - 1, (1,)).item())
+
+                result = self.pipe(
+                    prompt=prompt,
+                    image=image,
+                    height=out_h,
+                    width=out_w,
+                    num_inference_steps=num_steps,
+                    guidance_scale=guidance,
+                    max_sequence_length=256,
+                    generator=generator,
+                    callback_on_step_end=_progress,
+                ).images[0]
+
+                # If the pipeline resized the image (>1024×1024 pixel limit), scale the
+                # result back to the original dimensions before blending.
+                if result.size != orig_size:
+                    result = result.resize(orig_size, Image.LANCZOS)
+
+                # Blend: generated pixels inside the mask, originals outside.
+                result_np = np.array(result)
+                blended = (result_np * alpha + img_np * (1.0 - alpha)).clip(0, 255).astype(np.uint8)
+
+                path = output_path if count == 1 else f"{base}-{i + 1}{ext}"
+                Image.fromarray(blended).save(path)
+                print(f"OUTPUT: {path}", flush=True)
         finally:
             if hasattr(self.pipe, '_inpaint_mask'):
                 self.pipe._inpaint_mask = None   # always clear, even on exception
 
-        # If the pipeline resized the image (>1024×1024 pixel limit), scale the result
-        # back to the original dimensions before blending.
-        if result.size != orig_size:
-            result = result.resize(orig_size, Image.LANCZOS)
-
-        # Blend: use generated pixels inside the mask region, keep originals outside.
-        # Feather the mask (dilate, then blur) so the seam fades over ~15 px instead of
-        # a 1-px hard edge — same treatment as the LaMa blend in worker.py. Dilating
-        # first keeps alpha at 1.0 across the whole painted mask, so the fade happens
-        # over generated content just outside it (which matches the original anyway).
-        from PIL import ImageFilter
-        feathered = mask.filter(ImageFilter.MaxFilter(9)).filter(ImageFilter.GaussianBlur(6))
-        result_np = np.array(result)
-        alpha = np.array(feathered).astype(float) / 255.0
-        alpha = alpha[..., np.newaxis]   # H×W×1 for broadcasting
-        blended = (result_np * alpha + img_np * (1.0 - alpha)).clip(0, 255).astype(np.uint8)
-        Image.fromarray(blended).save(output_path)
-        print(f"OUTPUT: {output_path}", flush=True)
+        if count > 1:
+            print(f"BATCH_DONE: {count}", flush=True)
 
 
 def main():
@@ -401,9 +429,14 @@ def main():
                 break
             parts = line.strip().split("|")
             if len(parts) >= 4:
-                worker.process(parts[0], parts[1], parts[2], parts[3])
+                # Optional 5th field: how many variants to generate (default 1)
+                count = 1
+                if len(parts) >= 5 and parts[4].strip().isdigit():
+                    count = max(1, min(8, int(parts[4].strip())))
+                worker.process(parts[0], parts[1], parts[2], parts[3], count)
             else:
-                print("ERROR: Invalid command format. Expected img|mask|prompt|out", flush=True)
+                print("ERROR: Invalid command format. Expected img|mask|prompt|out[|count]",
+                      flush=True)
         except Exception as e:
             print(f"ERROR: {e}", flush=True)
 

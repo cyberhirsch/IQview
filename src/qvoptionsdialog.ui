@@ -1179,44 +1179,57 @@
              </layout>
             </item>
             <item row="1" column="0">
+             <widget class="QLabel" name="fluxBatchCountLabel">
+              <property name="text"><string>Variants per generation:</string></property>
+             </widget>
+            </item>
+            <item row="1" column="1">
+             <widget class="QSpinBox" name="fluxBatchCountSpinBox">
+              <property name="minimum"><number>1</number></property>
+              <property name="maximum"><number>8</number></property>
+              <property name="value"><number>1</number></property>
+              <property name="toolTip"><string>Generate this many variations per prompt. With more than one, a picker appears so you can choose which result to keep.</string></property>
+             </widget>
+            </item>
+            <item row="2" column="0">
              <widget class="QLabel" name="hfModelIdLabel">
               <property name="text"><string>HF Model ID:</string></property>
              </widget>
             </item>
-            <item row="1" column="1">
+            <item row="2" column="1">
              <widget class="QLineEdit" name="hfModelIdLineEdit">
               <property name="placeholderText"><string>black-forest-labs/FLUX.2-klein-4B</string></property>
               <property name="toolTip"><string>Hugging Face repo ID of the model (leave blank to use the default for the selected variant above).</string></property>
              </widget>
             </item>
-            <item row="2" column="0">
+            <item row="3" column="0">
              <widget class="QLabel" name="hfVaeLabel">
               <property name="text"><string>HF VAE Path:</string></property>
              </widget>
             </item>
-            <item row="2" column="1">
+            <item row="3" column="1">
              <widget class="QLineEdit" name="hfVaeLineEdit">
               <property name="placeholderText"><string>owner/repo/path/to/vae.safetensors</string></property>
               <property name="toolTip"><string>Hugging Face path to the VAE safetensors file (repo/filename). Used for FLUX.2-klein models.</string></property>
              </widget>
             </item>
-            <item row="3" column="0">
+            <item row="4" column="0">
              <widget class="QLabel" name="hfTextEncLabel">
               <property name="text"><string>HF Text Encoder:</string></property>
              </widget>
             </item>
-            <item row="3" column="1">
+            <item row="4" column="1">
              <widget class="QLineEdit" name="hfTextEncLineEdit">
               <property name="placeholderText"><string>owner/repo/path/to/text_encoder.safetensors</string></property>
               <property name="toolTip"><string>Hugging Face path to the text encoder safetensors file (repo/filename). Used for FLUX.2-klein models.</string></property>
              </widget>
             </item>
-            <item row="4" column="0">
+            <item row="5" column="0">
              <widget class="QLabel" name="hfBaseRepoLabel">
               <property name="text"><string>HF Base Repo:</string></property>
              </widget>
             </item>
-            <item row="4" column="1">
+            <item row="5" column="1">
              <widget class="QLineEdit" name="hfBaseRepoLineEdit">
               <property name="placeholderText"><string>black-forest-labs/FLUX.2-klein-9B</string></property>
               <property name="toolTip"><string>BF16 base repo providing the pipeline class, tokenizer and scheduler. Only needed for FLUX.2-klein models.</string></property>
