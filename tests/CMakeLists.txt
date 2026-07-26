@@ -21,6 +21,10 @@ set(TEST_SOURCES
     ../src/actionmanager.cpp
     ../src/settingsmanager.cpp
     ../src/shortcutmanager.cpp
+    ../src/hfauthdialog.cpp
+    ../src/retouchpromptbar.cpp
+    ../src/ailogdialog.cpp
+    ../src/variantdialog.cpp
 )
 
 # Add platform-specific sources
