@@ -66,6 +66,10 @@ signals:
 protected:
     void initializeShortcutsList();
 
+    // One-time cleanup of the persisted Ctrl+S binding, which used to belong
+    // to the animation-only "Save Frame As" and now belongs to "Save Image".
+    void migrateSaveShortcut();
+
 private:
     QList<SShortcut> shortcutsList;
 

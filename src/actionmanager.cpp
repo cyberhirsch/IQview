@@ -169,6 +169,9 @@ QMenuBar *ActionManager::buildMenuBar(QWidget *parent)
     fileMenu->addMenu(buildRecentsMenu(true, fileMenu));
     addCloneOfAction(fileMenu, "reloadfile");
     fileMenu->addSeparator();
+    addCloneOfAction(fileMenu, "saveimage");
+    addCloneOfAction(fileMenu, "saveimageas");
+    fileMenu->addSeparator();
 #ifdef Q_OS_MACOS
     fileMenu->addSeparator();
     addCloneOfAction(fileMenu, "closewindow");
@@ -613,6 +616,10 @@ void ActionManager::actionTriggered(QAction *triggeredAction, MainWindow *releva
         relevantWindow->lastFile();
     } else if (key == "saveframeas") {
         relevantWindow->saveFrameAs();
+    } else if (key == "saveimage") {
+        relevantWindow->saveImage();
+    } else if (key == "saveimageas") {
+        relevantWindow->saveImageAs();
     } else if (key == "pause") {
         relevantWindow->pause();
     } else if (key == "nextframe") {
@@ -790,6 +797,17 @@ void ActionManager::initializeActionLibrary()
             new QAction(QIcon::fromTheme("document-save-as"), tr("Save Frame &As..."));
     saveFrameAsAction->setData({ "gifdisable" });
     actionLibrary.insert("saveframeas", saveFrameAsAction);
+
+    auto *saveImageAction = new QAction(QIcon::fromTheme("document-save"), tr("&Save Image"));
+    saveImageAction->setData({ "disable" });
+    saveImageAction->setShortcut(QKeySequence::Save);
+    actionLibrary.insert("saveimage", saveImageAction);
+
+    auto *saveImageAsAction =
+            new QAction(QIcon::fromTheme("document-save-as"), tr("Save Image &As..."));
+    saveImageAsAction->setData({ "disable" });
+    saveImageAsAction->setShortcut(QKeySequence::SaveAs);
+    actionLibrary.insert("saveimageas", saveImageAsAction);
 
     auto *pauseAction = new QAction(QIcon::fromTheme("media-playback-pause"), tr("Pa&use"));
     pauseAction->setData({ "gifdisable" });

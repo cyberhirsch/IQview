@@ -393,7 +393,23 @@ void QVGraphicsView::loadMimeData(const QMimeData *mimeData)
 
 void QVGraphicsView::loadFile(const QString &fileName)
 {
+    // pendingEditedSource is set only by beginAiResultLoad(); every other
+    // load is a normal file open, which means there are no unsaved edits.
+    editedSource = pendingEditedSource;
+    pendingEditedSource.clear();
     imageCore.loadFile(fileName);
+}
+
+// Load an AI result while remembering which real file it was derived from, so
+// Save can offer to write back to the original rather than the temp output.
+void QVGraphicsView::beginAiResultLoad(const QString &outputPath)
+{
+    // On a chain of edits (Retouch -> Fill -> Isolate) the current file is
+    // already a temp output, so keep pointing at the true original.
+    pendingEditedSource = editedSource.isEmpty()
+            ? getCurrentFileDetails().fileInfo.absoluteFilePath()
+            : editedSource;
+    loadFile(outputPath);
 }
 
 void QVGraphicsView::reloadFile()
@@ -993,11 +1009,15 @@ QString QVGraphicsView::resolveLogPath()
 // so reusing one output path makes every generation after the first display
 // stale cached pixels. A fresh name per run sidesteps that. Outputs from
 // previous sessions (older than an hour) are cleaned up opportunistically.
-static QString uniqueAiOutputPath(const QString &prefix, const QString &ext)
+static QString uniqueAiOutputPath(const QString &prefix, const QString &ext,
+                                  const QString &keepPath = QString())
 {
     QDir temp(QDir::tempPath());
     const auto previous = temp.entryInfoList({ prefix + "_*." + ext }, QDir::Files);
     for (const auto &fileInfo : previous) {
+        // Never delete the image the user is currently looking at, however old.
+        if (fileInfo.absoluteFilePath() == keepPath)
+            continue;
         if (fileInfo.lastModified().secsTo(QDateTime::currentDateTime()) > 3600)
             QFile::remove(fileInfo.absoluteFilePath());
     }
@@ -1079,7 +1099,8 @@ void QVGraphicsView::applyRetouch()
 
     QString inputPath = QDir::tempPath() + "/iqview_retouch_in.bmp";
     QString maskPath = QDir::tempPath() + "/iqview_retouch_mask.bmp";
-    QString outputPath = uniqueAiOutputPath("iqview_retouch_out", "bmp");
+    QString outputPath = uniqueAiOutputPath("iqview_retouch_out", "bmp",
+                                            getCurrentFileDetails().fileInfo.absoluteFilePath());
 
     undoPixmap = loadedPixmapItem->pixmap();
     loadedPixmapItem->pixmap().save(inputPath, "BMP");
@@ -1140,7 +1161,7 @@ void QVGraphicsView::handleWorkerOutput()
         } else if (line == "DONE") {
             hideAiStatus();
             QApplication::restoreOverrideCursor();
-            loadFile(pendingOutputPath);
+            beginAiResultLoad(pendingOutputPath);
             exitRetouchMode();
         } else if (line.startsWith("STATUS: ")) {
             showAiStatus(line.mid(8));
@@ -1487,7 +1508,7 @@ void QVGraphicsView::handleFluxOutput()
             // Load result into imageCore — same as the LaMa pipeline does.
             // Direct setPixmap() on the scene item would be overwritten 50 ms later
             // by scaleExpensively(), which scales imageCore's (original) pixmap.
-            loadFile(outputPath);
+            beginAiResultLoad(outputPath);
             exitRetouchMode();
             QApplication::restoreOverrideCursor();
         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
@@ -1546,7 +1567,8 @@ void QVGraphicsView::applyCreativeFill()
     QString tempDir = QDir::tempPath();
     QString inputPath = QDir(tempDir).filePath("iqview_flux_in.bmp");
     QString maskPath = QDir(tempDir).filePath("iqview_flux_mask.bmp");
-    QString outputPath = uniqueAiOutputPath("iqview_flux_out", "bmp");
+    QString outputPath = uniqueAiOutputPath("iqview_flux_out", "bmp",
+                                            getCurrentFileDetails().fileInfo.absoluteFilePath());
 
     loadedPixmapItem->pixmap().save(inputPath);
     mask.save(maskPath);
@@ -1680,7 +1702,9 @@ void QVGraphicsView::handleIsolateOutput()
                 if (!selected.isEmpty()) {
                     isolateState = IsolateState::WaitingForCompose;
 
-                    QString outputPath = uniqueAiOutputPath("iqview_isolate_out", "png");
+                    QString outputPath = uniqueAiOutputPath(
+                            "iqview_isolate_out", "png",
+                            getCurrentFileDetails().fileInfo.absoluteFilePath());
                     QStringList ids;
                     for (int id : selected) ids << QString::number(id);
 
@@ -1702,7 +1726,7 @@ void QVGraphicsView::handleIsolateOutput()
             // Load via imageCore (not setPixmap) so a later scaleExpensively()
             // doesn't restore the original image over the result.
             undoPixmap = loadedPixmapItem->pixmap();
-            loadFile(line.mid(8).trimmed());
+            beginAiResultLoad(line.mid(8).trimmed());
             isolateState = IsolateState::Idle;
             QApplication::restoreOverrideCursor();
 

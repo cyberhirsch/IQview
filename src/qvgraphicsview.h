@@ -70,6 +70,13 @@ public:
         return imageCore.getCurrentFileDetails();
     }
     const QPixmap &getLoadedPixmap() const { return imageCore.getLoadedPixmap(); }
+
+    // True while an AI result is displayed that has not been saved to a real
+    // file yet (it lives only in the temp directory).
+    bool hasUnsavedEdits() const { return !editedSource.isEmpty(); }
+    // Absolute path of the original image the current edits came from.
+    QString getEditedSourcePath() const { return editedSource; }
+    void markEditsSaved() { editedSource.clear(); }
     const QMovie &getLoadedMovie() const { return imageCore.getLoadedMovie(); }
 
 signals:
@@ -165,6 +172,12 @@ private:
     QPolygonF lassoPolygon;
     QPixmap undoPixmap;
     QPointer<QDialog> aiLogDialog;
+    // Set by the AI handlers immediately before they load their temp output;
+    // consumed by loadFile() into editedSource. Any load that doesn't set it
+    // is a normal file open, which clears the edited state.
+    QString pendingEditedSource;
+    QString editedSource;
+    void beginAiResultLoad(const QString &outputPath);
     void updateMaskItem();
     void paintOnMask(const QPointF &scenePos);
     void finalizeLasso();

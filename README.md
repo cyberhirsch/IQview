@@ -32,7 +32,11 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 | **Right Click** | Cancel Retouch (Quick Action) | - |
 | **[ / ]** | Adjust Brush Size | - |
 | **Ctrl+Z** | Undo / Compare | - |
+| **Ctrl+S** | Save Image (offers to overwrite the original after an AI edit) | - |
+| **Ctrl+Shift+S** | Save Image As... | - |
 | **Ctrl+F** | Flip Image | - |
+
+> **Note:** AI results are written to your temp folder until you save them. Use **Ctrl+S** to keep an edit permanently.
 
 ## Installation
 Requires **Python 3.10+** on your PATH; iqView creates its own virtual environment on first use. An NVIDIA GPU with CUDA is strongly recommended (CPU fallback works but is slow).

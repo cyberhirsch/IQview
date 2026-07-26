@@ -103,6 +103,9 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     actionManager.addCloneOfAction(contextMenu, "retouch");
     actionManager.addCloneOfAction(contextMenu, "generate");
     actionManager.addCloneOfAction(contextMenu, "isolate");
+    contextMenu->addSeparator();
+    actionManager.addCloneOfAction(contextMenu, "saveimage");
+    actionManager.addCloneOfAction(contextMenu, "saveimageas");
     actionManager.addCloneOfAction(contextMenu, "ailog");
     contextMenu->addMenu(actionManager.buildHelpMenu(true, contextMenu));
 
@@ -1018,6 +1021,86 @@ void MainWindow::nextFile()
 void MainWindow::lastFile()
 {
     graphicsView->goToFile(QVGraphicsView::GoToFileMode::last);
+}
+
+bool MainWindow::writeImageTo(const QString &fileName)
+{
+    // Always write the full-resolution pixmap from imageCore — the scene item
+    // may be holding a downscaled copy produced by scaleExpensively().
+    const QPixmap &fullRes = graphicsView->getLoadedPixmap();
+    if (fullRes.isNull())
+        return false;
+
+    if (!fullRes.save(fileName, nullptr, 100)) {
+        QMessageBox::critical(this, tr("Save Failed"),
+                              tr("Could not write the image to:\n\n%1\n\n"
+                                 "Check that the location is writable and the file "
+                                 "extension is a supported image format.")
+                                      .arg(QDir::toNativeSeparators(fileName)));
+        return false;
+    }
+
+    // Adopt the saved file as the current document, so the title bar and any
+    // further Save no longer point at a temp AI output.
+    graphicsView->markEditsSaved();
+    graphicsView->loadFile(fileName);
+    return true;
+}
+
+void MainWindow::saveImage()
+{
+    if (!getCurrentFileDetails().isPixmapLoaded)
+        return;
+
+    // Only a genuine overwrite target makes "Save" meaningful; otherwise this
+    // is just a Save As.
+    const QString original = graphicsView->getEditedSourcePath();
+    if (!graphicsView->hasUnsavedEdits() || original.isEmpty()) {
+        saveImageAs();
+        return;
+    }
+
+    const auto choice = QMessageBox::warning(
+            this, tr("Save Image"),
+            tr("Overwrite the original file with your edits?\n\n%1")
+                    .arg(QDir::toNativeSeparators(original)),
+            QMessageBox::Save | QMessageBox::Cancel, QMessageBox::Cancel);
+    if (choice != QMessageBox::Save)
+        return;
+
+    writeImageTo(original);
+}
+
+void MainWindow::saveImageAs()
+{
+    if (!getCurrentFileDetails().isPixmapLoaded)
+        return;
+
+    QSettings settings;
+    settings.beginGroup("recents");
+
+    // Base the suggestion on the original image, not the temp AI output.
+    const QString original = graphicsView->hasUnsavedEdits()
+            ? graphicsView->getEditedSourcePath()
+            : getCurrentFileDetails().fileInfo.absoluteFilePath();
+    const QFileInfo originalInfo(original);
+    const QString suggestion = graphicsView->hasUnsavedEdits()
+            ? originalInfo.completeBaseName() + "-edited.png"
+            : originalInfo.completeBaseName() + ".png";
+
+    auto *saveDialog = new QFileDialog(this, tr("Save Image As..."));
+    saveDialog->setDirectory(originalInfo.absolutePath().isEmpty()
+                                     ? settings.value("lastFileDialogDir", QDir::homePath())
+                                               .toString()
+                                     : originalInfo.absolutePath());
+    saveDialog->setNameFilters(qvApp->getNameFilterList());
+    saveDialog->selectFile(suggestion);
+    saveDialog->setDefaultSuffix("png");
+    saveDialog->setAcceptMode(QFileDialog::AcceptSave);
+    saveDialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(saveDialog, &QFileDialog::fileSelected, this,
+            [this](const QString &fileName) { writeImageTo(fileName); });
+    saveDialog->open();
 }
 
 void MainWindow::saveFrameAs()

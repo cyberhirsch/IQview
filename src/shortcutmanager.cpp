@@ -7,8 +7,38 @@
 ShortcutManager::ShortcutManager(QObject *parent) : QObject(parent)
 {
     initializeShortcutsList();
+    migrateSaveShortcut();
     updateShortcuts();
     hideShortcuts();
+}
+
+void ShortcutManager::migrateSaveShortcut()
+{
+    QSettings settings;
+    if (settings.value("saveImageShortcutMigrated", false).toBool())
+        return;
+    settings.setValue("saveImageShortcutMigrated", true);
+
+    // Users who ever applied the options dialog have every shortcut persisted,
+    // including saveframeas=Ctrl+S. Left alone that would make Ctrl+S ambiguous
+    // with the new Save Image action, so strip it from the old binding.
+    settings.beginGroup("shortcuts");
+    if (!settings.contains("saveframeas")) {
+        settings.endGroup();
+        return;
+    }
+
+    QStringList existing = settings.value("saveframeas").toStringList();
+    bool changed = false;
+    for (const QString &binding : keyBindingsToStringList(QKeySequence::Save))
+        changed |= existing.removeAll(binding) > 0;
+
+    if (changed) {
+        if (existing.isEmpty())
+            existing = QStringList(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_S).toString());
+        settings.setValue("saveframeas", existing);
+    }
+    settings.endGroup();
 }
 
 void ShortcutManager::updateShortcuts()
@@ -150,9 +180,19 @@ void ShortcutManager::initializeShortcutsList()
         shortcutsList.last().defaultShortcuts << QKeySequence(Qt::Key_F11).toString();
     }
 #endif
+    shortcutsList.append({ tr("Save Image"),
+                           "saveimage",
+                           keyBindingsToStringList(QKeySequence::Save),
+                           {} });
+    shortcutsList.append({ tr("Save Image As"),
+                           "saveimageas",
+                           keyBindingsToStringList(QKeySequence::SaveAs),
+                           {} });
+    // Ctrl+S belongs to Save Image; Save Frame As is animation-only and moves
+    // aside to avoid an ambiguous binding.
     shortcutsList.append({ tr("Save Frame As"),
                            "saveframeas",
-                           keyBindingsToStringList(QKeySequence::Save),
+                           QStringList(QKeySequence(Qt::CTRL | Qt::ALT | Qt::Key_S).toString()),
                            {} });
     shortcutsList.append(
             { tr("Pause"), "pause", QStringList(QKeySequence(Qt::Key_P).toString()), {} });

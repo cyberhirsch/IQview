@@ -119,6 +119,8 @@ public:
     void applyRetouch();
     void applyCreativeFill();
     void applyIsolate();
+    void saveImage();
+    void saveImageAs();
     void showAiLogWindow();
     void checkGenerativeAccess();
     void exitRetouchMode();
@@ -171,6 +173,10 @@ protected slots:
     void shortcutsUpdated();
 
 private:
+    // Writes the full-resolution pixmap to fileName and adopts it as the
+    // current document. Shows an error box and returns false on failure.
+    bool writeImageTo(const QString &fileName);
+
     Ui::MainWindow *ui;
     QVGraphicsView *graphicsView;
 
