@@ -43,5 +43,25 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 Requires **Python 3.10+** on your PATH; iqView creates its own virtual environment on first use. An NVIDIA GPU with CUDA is strongly recommended (CPU fallback works but is slow).
 C++ code builds with **Qt 6 / CMake** on Windows, Linux, and macOS.
 
+The image viewer itself needs no setup — Python and the AI environment are only touched the first time you actually use Retouch, Creative Fill, or Isolate. Opening and browsing images works immediately, with no Hugging Face account required.
+
+## 🖥 Platform Support
+
+| Platform | Viewer | AI Features |
+| --- | --- | --- |
+| **Windows + NVIDIA** | ✅ | ✅ Verified — this is the primary dev environment (RTX 3090) |
+| **Windows (no NVIDIA GPU)** | ✅ | ⚠️ Works via CPU fallback, but slow |
+| **macOS** | ✅ (builds via CI) | ❓ Untested — no MPS/Metal acceleration path yet, CPU fallback only |
+| **Linux + NVIDIA** | ✅ (builds via CI) | ❓ Untested — CUDA path exists in code but hasn't been run on real Linux hardware |
+| **Linux (no NVIDIA GPU)** | ✅ (builds via CI) | ⚠️ Works via CPU fallback, but slow |
+
+**Looking for testers on macOS and Linux.** The C++ viewer compiles and passes CI on all three platforms, but the Python AI pipeline (LaMa, FLUX.2, SAM 3) has only ever been run on Windows with an NVIDIA GPU. If you try iqView on Mac or Linux — even just confirming the viewer itself opens and browses images smoothly — please [open an issue](https://github.com/cyberhirsch/iqView/issues) and let us know what happened.
+
+## 📜 Model Licenses
+AI features use third-party models with their own license terms, downloaded on demand (never bundled):
+- **LaMa** — [Apache 2.0](https://github.com/advimman/lama)
+- **FLUX.2-klein** — [Apache 2.0](https://huggingface.co/black-forest-labs/FLUX.2-klein-4B), cleared for commercial use
+- **SAM 3** — [Meta's SAM License](https://huggingface.co/facebook/sam3) (gated — requires accepting Meta's terms with your own Hugging Face token before downloading)
+
 ---
 *Based on the original [qView](https://github.com/jurplel/qView) by Jurplel.*
