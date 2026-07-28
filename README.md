@@ -18,6 +18,7 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 - **Creative Fill (G)** — *FLUX.2 klein*: mask a region, type a prompt, and generate photo-real replacement content in seconds.
 - **Isolate (S)** — *SAM 3*: one-click subject cutout — removes the background and gives you a transparent PNG.
 - **Zero Configuration**: the Python environment and AI models are set up and downloaded automatically on first use.
+- **Idle Prefetch (optional)**: enable "Preload Retouch model when idle" in Settings to warm up LaMa a few seconds after you stop on an image, so `R` never has a cold-start delay. Off by default; only activates once the AI environment is already set up.
 - **Privacy First**: all AI processing happens locally on your machine — your photos never leave your computer. (Gated models like FLUX and SAM 3 require a free Hugging Face token to download weights.)
 
 ## 🎮 Shortcuts

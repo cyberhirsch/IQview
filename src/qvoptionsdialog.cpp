@@ -257,6 +257,7 @@ void QVOptionsDialog::syncSettings(bool defaults, bool makeConnections)
             if (!path.isEmpty()) { ui->lamaModelLineEdit->setText(path); modifySetting("lamamodelpath", path); }
         });
     }
+    syncCheckbox(ui->prefetchLamaOnIdleCheckBox, "prefetchlamaonidle", defaults, makeConnections);
     // --- AI: Generate — Model Files ---
     syncPathLineEdit(ui->fluxTransformerLineEdit, "fluxtransformerpath",
                      modelsDir + "/flux-2-klein-9b-fp8.safetensors", defaults, makeConnections);

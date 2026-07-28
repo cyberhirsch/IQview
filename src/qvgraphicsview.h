@@ -197,6 +197,16 @@ private:
     QString pendingOutputPath;
     bool maskHasPaint = false;
 
+    // Idle prefetch: quietly warm the LaMa worker a few seconds after the
+    // user settles on an image, so pressing R has no cold-start delay.
+    // Only fires if the AI environment is already set up (never triggers
+    // first-run setup) and stays silent unless the user is actually waiting
+    // on it (see silentWorkerStart).
+    QTimer *idlePrefetchTimer = nullptr;
+    bool silentWorkerStart = false;
+    void scheduleIdlePrefetch();
+    void performIdlePrefetch();
+
     void repositionPromptBar();
     void showAiStatus(const QString &text);
     void hideAiStatus();

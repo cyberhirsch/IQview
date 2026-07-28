@@ -63,7 +63,8 @@ public:
         FluxTransformerPath,
         FluxVaePath,
         FluxTextEncPath,
-        FluxBatchCount
+        FluxBatchCount,
+        PrefetchLamaOnIdle
     };
     Q_ENUM(Setting)
 

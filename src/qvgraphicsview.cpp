@@ -70,6 +70,11 @@ QVGraphicsView::QVGraphicsView(QWidget *parent) : QGraphicsView(parent)
     expensiveScaleTimerNew->setInterval(50);
     connect(expensiveScaleTimerNew, &QTimer::timeout, this, [this] { scaleExpensively(); });
 
+    idlePrefetchTimer = new QTimer(this);
+    idlePrefetchTimer->setSingleShot(true);
+    idlePrefetchTimer->setInterval(4000);
+    connect(idlePrefetchTimer, &QTimer::timeout, this, &QVGraphicsView::performIdlePrefetch);
+
     loadedPixmapItem = new QGraphicsPixmapItem();
     scene->addItem(loadedPixmapItem);
 
@@ -424,6 +429,7 @@ void QVGraphicsView::postLoad()
 {
     updateLoadedPixmapItem();
     qvApp->getActionManager().addFileToRecentsList(getCurrentFileDetails().fileInfo);
+    scheduleIdlePrefetch();
 
     emit fileChanged();
 }
@@ -918,6 +924,8 @@ void QVGraphicsView::toggleRetouchMode()
         }
 
         // Eagerly start the AI worker so it's warm by the time the user clicks 'Apply'
+        idlePrefetchTimer->stop();
+        silentWorkerStart = false;
         ensureWorkerStarted();
     } else {
         exitRetouchMode();
@@ -1108,6 +1116,7 @@ void QVGraphicsView::applyRetouch()
 
     pendingOutputPath = outputPath;
     QApplication::setOverrideCursor(Qt::WaitCursor);
+    silentWorkerStart = false;
     ensureWorkerStarted();
 
     if (!isWorkerReady) {
@@ -1134,6 +1143,35 @@ void QVGraphicsView::applyRetouch()
     }
 }
 
+void QVGraphicsView::scheduleIdlePrefetch()
+{
+    idlePrefetchTimer->stop();
+    if (!qvGetSettingBool(PrefetchLamaOnIdle))
+        return;
+    if (!getCurrentFileDetails().isPixmapLoaded || retouchTool != RetouchTool::Off)
+        return;
+    if (workerProcess && workerProcess->state() == QProcess::Running)
+        return;   // already warm, nothing to prefetch
+    idlePrefetchTimer->start();
+}
+
+void QVGraphicsView::performIdlePrefetch()
+{
+    if (!qvGetSettingBool(PrefetchLamaOnIdle))
+        return;
+    if (!getCurrentFileDetails().isPixmapLoaded || retouchTool != RetouchTool::Off)
+        return;
+    if (workerProcess && workerProcess->state() == QProcess::Running)
+        return;
+    // Never trigger the first-time "set up AI environment" flow on our own —
+    // only warm the worker if it's already installed.
+    if (!QFile::exists(resolvePythonExe()))
+        return;
+
+    silentWorkerStart = true;
+    ensureWorkerStarted();
+}
+
 void QVGraphicsView::ensureWorkerStarted()
 {
     if (workerProcess && workerProcess->state() == QProcess::Running) return;
@@ -1143,6 +1181,23 @@ void QVGraphicsView::ensureWorkerStarted()
 
     workerProcess = new QProcess(this);
     connect(workerProcess, &QProcess::readyReadStandardOutput, this, &QVGraphicsView::handleWorkerOutput);
+    connect(workerProcess, &QProcess::readyReadStandardError, this, [this]() {
+        QFile log(QDir(QDir::tempPath()).filePath("iqview_worker_log.txt"));
+        if (log.open(QIODevice::Append | QIODevice::Text))
+            log.write(workerProcess->readAllStandardError());
+    });
+    connect(workerProcess, &QProcess::errorOccurred, this, [this](QProcess::ProcessError) {
+        if (isWorkerReady)
+            return;
+        hideAiStatus();
+        QApplication::restoreOverrideCursor();
+        QMessageBox::critical(this, tr("AI Error"),
+                              tr("The AI service failed to start: %1\n\n"
+                                 "Check that the Python environment is set up (run Retouch once "
+                                 "to install it).\n\nLog: %2")
+                                  .arg(workerProcess->errorString(),
+                                       QDir(QDir::tempPath()).filePath("iqview_worker_log.txt")));
+    });
     QStringList workerArgs = { resolveScriptsDir() + "/worker.py" };
     QString lamaPath = qvGetSettingString(LamaModelPath);
     if (lamaPath.isEmpty())
@@ -1157,6 +1212,7 @@ void QVGraphicsView::handleWorkerOutput()
         QString line = QString::fromUtf8(workerProcess->readLine()).trimmed();
         if (line == "READY") {
             isWorkerReady = true;
+            silentWorkerStart = false;
             hideAiStatus();
         } else if (line == "DONE") {
             hideAiStatus();
@@ -1164,11 +1220,18 @@ void QVGraphicsView::handleWorkerOutput()
             beginAiResultLoad(pendingOutputPath);
             exitRetouchMode();
         } else if (line.startsWith("STATUS: ")) {
-            showAiStatus(line.mid(8));
+            if (!silentWorkerStart)
+                showAiStatus(line.mid(8));
         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
+            // Don't pop an error dialog for a failure the user never asked for —
+            // a silent idle prefetch that fails just means R will fall back to
+            // the normal cold-start path (with its own error handling) later.
+            const bool wasSilentPrefetch = silentWorkerStart;
+            silentWorkerStart = false;
             hideAiStatus();
             QApplication::restoreOverrideCursor();
-            QMessageBox::warning(this, tr("Retouch Error"), line);
+            if (!wasSilentPrefetch)
+                QMessageBox::warning(this, tr("Retouch Error"), line);
         }
     }
 }
