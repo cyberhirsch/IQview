@@ -52,7 +52,9 @@ if ((Test-Path "$imfDir\kimg_tga.dll") -and (Test-Path "$imfDir\qtga.dll")) {
 if ($NightlyVersion -eq '') {
     # Call innomake if we are not building a nightly version (no version passed)
     & "dist/scripts/innomake.ps1"
-} else {
-    # Do renaming-y stuff otherwise
-    mv bin\iqView.exe "bin\iqView-nightly-$NightlyVersion.exe"
 }
+# The exe stays named iqView.exe regardless of nightly/release -- the build
+# number is already embedded in the binary and shown in the About dialog
+# (see NIGHTLY define), and the download zip/release filename already carries
+# the date, so renaming the exe itself just adds friction (broken shortcuts
+# between updates, an unfamiliar filename to launch).
