@@ -32,6 +32,7 @@
 #include <QNetworkRequest>
 #include <QSysInfo>
 #include <QTemporaryFile>
+#include <QDirIterator>
 
 QVGraphicsView::QVGraphicsView(QWidget *parent) : QGraphicsView(parent)
 {
@@ -1272,11 +1273,20 @@ bool QVGraphicsView::ensureAiEnvironment()
     progress.setAutoReset(false);
     progress.show();
 
+    // uv downloads packages into its own cache before linking them into the
+    // venv, so the venv directory barely grows until a burst at the very end
+    // -- pointing the cache somewhere known lets the heartbeat below watch
+    // the directory that's actually filling up in real time.
+    const QString uvCacheDir = resolveUvDir() + "/cache";
+
     // Runs one setup step, pumping its output into the progress dialog so the
     // UI stays responsive and the user can see something is happening.
     auto runStep = [&](const QString &program, const QStringList &args, int timeoutMs) {
         QProcess proc;
         proc.setProcessChannelMode(QProcess::MergedChannels);
+        QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        env.insert("UV_CACHE_DIR", uvCacheDir);
+        proc.setProcessEnvironment(env);
         QFile log(logPath);
         const bool logOpen = log.open(QIODevice::Append | QIODevice::Text);
 
@@ -1324,8 +1334,13 @@ bool QVGraphicsView::ensureAiEnvironment()
     // 1. Create the virtual environment. uv downloads a portable Python 3.12
     //    automatically if none is already available -- no system Python
     //    install/PATH requirement, on any of the three platforms.
+    //    --clear wipes any partial directory left behind by a previous
+    //    cancelled/crashed/interrupted attempt -- without it, uv refuses to
+    //    reuse a non-empty directory and setup fails permanently every time
+    //    afterward until the user manually deletes it.
     progress.setLabelText(tr("Creating Python environment…"));
-    const bool created = runStep(resolveUvExe(), { "venv", "--python", "3.12", venvDir }, 600000)
+    const bool created =
+            runStep(resolveUvExe(), { "venv", "--python", "3.12", "--clear", venvDir }, 600000)
             && QFile::exists(resolvePythonExe());
     if (!created) {
         progress.close();
@@ -1341,12 +1356,38 @@ bool QVGraphicsView::ensureAiEnvironment()
     //    driver (NVIDIA/AMD/Intel) and picks the matching PyTorch build, or
     //    falls back to CPU/MPS automatically -- same command on every
     //    platform. Torch alone is multi-GB, so allow a long window.
+    //
+    //    --no-progress suppresses uv's own \r-based progress bar, which isn't
+    //    line-buffered and would otherwise never reach readyReadStandardOutput
+    //    until a real newline arrives -- leaving the dialog looking frozen for
+    //    long stretches. In its place, a heartbeat timer reports the venv's
+    //    on-disk size every couple of seconds, so there's always visible
+    //    movement even during silent multi-minute downloads.
     progress.setLabelText(tr("Installing AI dependencies (several GB)…"));
+    QTimer sizeHeartbeat;
+    sizeHeartbeat.setInterval(2000);
+    connect(&sizeHeartbeat, &QTimer::timeout, &progress, [&]() {
+        qint64 bytes = 0;
+        // Cache fills up first (real-time download progress); the venv itself
+        // only grows in a final burst when uv links the cached files in.
+        for (const QString &dir : { uvCacheDir, venvDir }) {
+            QDirIterator it(dir, QDir::Files, QDirIterator::Subdirectories);
+            while (it.hasNext()) {
+                it.next();
+                bytes += it.fileInfo().size();
+            }
+        }
+        progress.setLabelText(
+                tr("Installing AI dependencies… %1 MB so far").arg(bytes / 1024 / 1024));
+    });
+    sizeHeartbeat.start();
+
     const bool installed = runStep(resolveUvExe(),
                                    { "pip", "install", "--python", resolvePythonExe(),
                                     "--torch-backend", "auto", "--no-progress", "-r",
                                     requirements },
                                    3600000);
+    sizeHeartbeat.stop();
     const bool canceled = progress.wasCanceled();
     progress.close();
 

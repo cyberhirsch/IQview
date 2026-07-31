@@ -113,22 +113,6 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
         ActionManager::actionTriggered(triggeredAction, this);
     });
 
-    // Keyboard-only retouch shortcuts. These actions exist in the action library
-    // but were never added to a menu or widget, so their shortcuts never fired --
-    // Return did nothing after painting a mask. Bound as QShortcuts (same
-    // approach as the escape shortcut above) so they work regardless of menus.
-    auto *applyRetouchShortcut = new QShortcut(Qt::Key_Return, this);
-    connect(applyRetouchShortcut, &QShortcut::activated, this, [this]() { applyRetouch(); });
-
-    auto *applyRetouchEnterShortcut = new QShortcut(Qt::Key_Enter, this);   // numpad
-    connect(applyRetouchEnterShortcut, &QShortcut::activated, this, [this]() { applyRetouch(); });
-
-    auto *increaseBrushShortcut = new QShortcut(Qt::Key_BracketRight, this);
-    connect(increaseBrushShortcut, &QShortcut::activated, this, [this]() { changeBrushSize(5); });
-
-    auto *decreaseBrushShortcut = new QShortcut(Qt::Key_BracketLeft, this);
-    connect(decreaseBrushShortcut, &QShortcut::activated, this, [this]() { changeBrushSize(-5); });
-
     // Initialize menubar
     setMenuBar(actionManager.buildMenuBar(this));
     // Stop actions conflicting with the window's actions
