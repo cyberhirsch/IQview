@@ -923,10 +923,16 @@ void QVGraphicsView::toggleRetouchMode()
             updateMaskItem();
         }
 
-        // Eagerly start the AI worker so it's warm by the time the user clicks 'Apply'
+        // Eagerly start the AI worker so it's warm by the time the user clicks 'Apply'.
+        // Only if the environment is already set up — otherwise resolvePythonExe()
+        // points at a venv that doesn't exist yet, and starting it here would fail
+        // with a raw QProcess error before the user ever reaches applyRetouch()'s
+        // friendly "set up the AI environment?" first-run flow.
         idlePrefetchTimer->stop();
-        silentWorkerStart = false;
-        ensureWorkerStarted();
+        if (QFile::exists(resolvePythonExe())) {
+            silentWorkerStart = false;
+            ensureWorkerStarted();
+        }
     } else {
         exitRetouchMode();
     }
