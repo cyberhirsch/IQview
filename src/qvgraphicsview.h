@@ -212,7 +212,13 @@ private:
     void hideAiStatus();
     void repositionAiStatus();
     static QString resolveScriptsDir();
+    static QString resolveVenvDir();
     static QString resolvePythonExe();
+    static QString resolveUvDir();
+    static QString resolveUvExe();
+    // First-run Python environment setup, shared by all AI features.
+    bool ensureAiEnvironment();
+    bool ensureUvInstalled(class QProgressDialog &progress, const QString &logPath);
     static QString resolveLogPath();
     static QString resolveModelsDir();
 

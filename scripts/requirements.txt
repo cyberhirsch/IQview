@@ -1,8 +1,15 @@
-onnxruntime-gpu
+# onnxruntime accelerator varies by platform: DirectML on Windows (works on
+# any GPU vendor, not just NVIDIA), CUDA on Linux, CoreML is built into the
+# plain package on macOS.
+onnxruntime-directml; sys_platform == "win32"
+onnxruntime-gpu; sys_platform == "linux"
+onnxruntime; sys_platform == "darwin"
 numpy
 opencv-python
 pillow
 requests
+# torch/torchvision accelerator (CUDA/MPS/CPU) is selected at install time via
+# `uv pip install --torch-backend=auto`, not pinned here.
 torch
 torchvision
 git+https://github.com/huggingface/diffusers.git

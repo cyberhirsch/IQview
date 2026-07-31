@@ -27,6 +27,11 @@
 #include <QPen>
 #include <QProgressDialog>
 #include <QEventLoop>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QSysInfo>
+#include <QTemporaryFile>
 
 QVGraphicsView::QVGraphicsView(QWidget *parent) : QGraphicsView(parent)
 {
@@ -1060,9 +1065,23 @@ QString QVGraphicsView::resolveScriptsDir()
     return appDir + "/scripts";
 }
 
+QString QVGraphicsView::resolveVenvDir()
+{
+    // Prefer a venv sitting next to the scripts -- that's a developer checkout,
+    // and reusing it avoids re-downloading several GB of dependencies.
+    const QString local = resolveScriptsDir() + "/.venv";
+    if (QFileInfo::exists(local))
+        return QDir(local).absolutePath();
+
+    // Installed builds live somewhere unwritable (Program Files, /opt, inside an
+    // .app bundle), so the environment has to go in app data instead.
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+            .absoluteFilePath("venv");
+}
+
 QString QVGraphicsView::resolvePythonExe()
 {
-    const QString venv = resolveScriptsDir() + "/.venv";
+    const QString venv = resolveVenvDir();
 #ifdef Q_OS_WIN
     return venv + "/Scripts/python.exe";
 #else
@@ -1070,46 +1089,285 @@ QString QVGraphicsView::resolvePythonExe()
 #endif
 }
 
+// Pinned uv release. Bump deliberately, not automatically -- keeps the
+// download URL and behavior reproducible across sessions.
+static const QString UV_VERSION = QStringLiteral("0.12.0");
+
+QString QVGraphicsView::resolveUvDir()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
+            .absoluteFilePath("uv");
+}
+
+QString QVGraphicsView::resolveUvExe()
+{
+#ifdef Q_OS_WIN
+    return resolveUvDir() + "/uv.exe";
+#else
+    return resolveUvDir() + "/uv";
+#endif
+}
+
+// uv itself manages the Python interpreter (downloading a portable one if
+// needed) and picks the right PyTorch accelerator per machine, so iqView no
+// longer depends on a pre-installed system Python at all. uv is a small
+// (~20 MB), dependency-free static binary -- fetched once from GitHub
+// releases and cached in AppData, the same place the venv itself lives.
+bool QVGraphicsView::ensureUvInstalled(QProgressDialog &progress, const QString &logPath)
+{
+    if (QFile::exists(resolveUvExe()))
+        return true;
+
+    QString platformTag;
+    QString archiveExt;
+#ifdef Q_OS_WIN
+    archiveExt = "zip";
+    const QString arch = QSysInfo::currentCpuArchitecture();
+    if (arch == QLatin1String("arm64"))
+        platformTag = "aarch64-pc-windows-msvc";
+    else if (arch == QLatin1String("i386") || arch == QLatin1String("x86"))
+        platformTag = "i686-pc-windows-msvc";
+    else
+        platformTag = "x86_64-pc-windows-msvc";
+#elif defined(Q_OS_MACOS)
+    archiveExt = "tar.gz";
+    platformTag = QSysInfo::currentCpuArchitecture() == QLatin1String("arm64")
+            ? "aarch64-apple-darwin"
+            : "x86_64-apple-darwin";
+#else
+    archiveExt = "tar.gz";
+    platformTag = QSysInfo::currentCpuArchitecture() == QLatin1String("arm64")
+            ? "aarch64-unknown-linux-gnu"
+            : "x86_64-unknown-linux-gnu";
+#endif
+
+    const QString assetName = QString("uv-%1.%2").arg(platformTag, archiveExt);
+    const QUrl url(QString("https://github.com/astral-sh/uv/releases/download/%1/%2")
+                           .arg(UV_VERSION, assetName));
+
+    progress.setLabelText(tr("Downloading setup tool…"));
+
+    QTemporaryFile archive(QDir::tempPath() + "/iqview_uv_XXXXXX." + archiveExt);
+    if (!archive.open()) {
+        QMessageBox::critical(this, tr("AI Setup"), tr("Could not create a temporary file."));
+        return false;
+    }
+    archive.setAutoRemove(false);
+    const QString archivePath = archive.fileName();
+    archive.close();
+
+    QNetworkAccessManager net;
+    QNetworkRequest request(url);
+    request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
+                         QNetworkRequest::NoLessSafeRedirectPolicy);
+    auto *reply = net.get(request);
+
+    QFile out(archivePath);
+    if (!out.open(QIODevice::WriteOnly)) {
+        reply->abort();
+        reply->deleteLater();
+        return false;
+    }
+
+    QEventLoop loop;
+    connect(reply, &QNetworkReply::readyRead, &loop,
+            [&]() { out.write(reply->readAll()); });
+    connect(reply, &QNetworkReply::downloadProgress, &loop,
+            [&](qint64 received, qint64 total) {
+                if (total > 0)
+                    progress.setLabelText(
+                            tr("Downloading setup tool… %1 / %2 MB")
+                                    .arg(received / 1024 / 1024)
+                                    .arg(total / 1024 / 1024));
+            });
+    connect(reply, &QNetworkReply::finished, &loop, &QEventLoop::quit);
+    connect(&progress, &QProgressDialog::canceled, reply, &QNetworkReply::abort);
+    loop.exec();
+
+    out.write(reply->readAll());
+    out.close();
+    const bool ok = reply->error() == QNetworkReply::NoError;
+    const QString errorString = reply->errorString();
+    reply->deleteLater();
+
+    if (!ok) {
+        QFile::remove(archivePath);
+        if (!progress.wasCanceled()) {
+            QMessageBox::critical(this, tr("AI Setup"),
+                                  tr("Could not download the setup tool: %1").arg(errorString));
+        }
+        return false;
+    }
+
+    const QString uvDir = resolveUvDir();
+    QDir().mkpath(uvDir);
+
+    // bsdtar (ships as tar.exe on Windows 10 1803+, and is the default tar on
+    // macOS) handles both .zip and .tar.gz with the same -xf invocation, so
+    // one code path covers all three platforms without adding a zip library.
+    progress.setLabelText(tr("Extracting setup tool…"));
+    QProcess extract;
+    extract.setWorkingDirectory(uvDir);
+    extract.start("tar", { "-xf", archivePath });
+    const bool extracted = extract.waitForStarted() && extract.waitForFinished(60000)
+            && extract.exitStatus() == QProcess::NormalExit && extract.exitCode() == 0;
+    QFile::remove(archivePath);
+
+    if (!extracted || !QFile::exists(resolveUvExe())) {
+        QFile log(logPath);
+        if (log.open(QIODevice::Append | QIODevice::Text))
+            log.write(extract.readAllStandardError());
+        QMessageBox::critical(this, tr("AI Setup"),
+                              tr("Could not extract the setup tool.\n\nLog: %1")
+                                      .arg(QDir::toNativeSeparators(logPath)));
+        return false;
+    }
+
+#ifndef Q_OS_WIN
+    QFile::setPermissions(resolveUvExe(),
+                          QFile::permissions(resolveUvExe()) | QFile::ExeOwner | QFile::ExeUser
+                                  | QFile::ExeGroup);
+#endif
+    return true;
+}
+
+// First-run setup, shared by every AI feature. Creates the Python environment
+// and installs dependencies, reporting progress as it goes. Returns true when
+// the environment is ready to use.
+bool QVGraphicsView::ensureAiEnvironment()
+{
+    if (QFile::exists(resolvePythonExe()))
+        return true;
+
+    const QString requirements = resolveScriptsDir() + "/requirements.txt";
+    if (!QFile::exists(requirements)) {
+        QMessageBox::critical(this, tr("AI Setup"),
+                              tr("Could not find the AI scripts that ship with iqView.\n\n"
+                                 "Expected: %1")
+                                      .arg(QDir::toNativeSeparators(requirements)));
+        return false;
+    }
+
+    if (QMessageBox::question(
+                this, tr("AI Setup"),
+                tr("iqView needs to set up a local Python environment before it can use "
+                   "its AI features.\n\nThis downloads several GB and can take 10–20 minutes, "
+                   "but only happens once.\n\nSet it up now?"),
+                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes)
+        != QMessageBox::Yes)
+        return false;
+
+    const QString venvDir = resolveVenvDir();
+    QDir().mkpath(QFileInfo(venvDir).absolutePath());
+
+    const QString logPath = resolveLogPath();
+    QDir().mkpath(QFileInfo(logPath).absolutePath());
+
+    QProgressDialog progress(tr("Creating Python environment…"), tr("Cancel"), 0, 0, this);
+    progress.setWindowTitle(tr("Setting up AI environment"));
+    progress.setWindowModality(Qt::WindowModal);
+    progress.setMinimumDuration(0);
+    progress.setMinimumWidth(480);
+    progress.setAutoClose(false);
+    progress.setAutoReset(false);
+    progress.show();
+
+    // Runs one setup step, pumping its output into the progress dialog so the
+    // UI stays responsive and the user can see something is happening.
+    auto runStep = [&](const QString &program, const QStringList &args, int timeoutMs) {
+        QProcess proc;
+        proc.setProcessChannelMode(QProcess::MergedChannels);
+        QFile log(logPath);
+        const bool logOpen = log.open(QIODevice::Append | QIODevice::Text);
+
+        QEventLoop loop;
+        connect(&proc, &QProcess::readyReadStandardOutput, &loop, [&]() {
+            while (proc.canReadLine()) {
+                const QString line = QString::fromUtf8(proc.readLine()).trimmed();
+                if (line.isEmpty())
+                    continue;
+                if (logOpen)
+                    log.write((line + "\n").toUtf8());
+                progress.setLabelText(line.right(140));
+            }
+        });
+        connect(&proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), &loop,
+                &QEventLoop::quit);
+        connect(&proc, &QProcess::errorOccurred, &loop, &QEventLoop::quit);
+        connect(&progress, &QProgressDialog::canceled, &proc, &QProcess::kill);
+
+        QTimer timeout;
+        timeout.setSingleShot(true);
+        connect(&timeout, &QTimer::timeout, &loop, [&]() {
+            proc.kill();
+            loop.quit();
+        });
+        timeout.start(timeoutMs);
+
+        proc.start(program, args);
+        loop.exec();
+        return proc.exitStatus() == QProcess::NormalExit && proc.exitCode() == 0;
+    };
+
+    // 0. Fetch uv itself if this is the very first AI feature used on this
+    //    machine. uv manages its own portable Python (no system Python
+    //    dependency at all) and its own accelerator selection below.
+    if (!ensureUvInstalled(progress, logPath)) {
+        progress.close();
+        return false;
+    }
+    if (progress.wasCanceled()) {
+        progress.close();
+        return false;
+    }
+
+    // 1. Create the virtual environment. uv downloads a portable Python 3.12
+    //    automatically if none is already available -- no system Python
+    //    install/PATH requirement, on any of the three platforms.
+    progress.setLabelText(tr("Creating Python environment…"));
+    const bool created = runStep(resolveUvExe(), { "venv", "--python", "3.12", venvDir }, 600000)
+            && QFile::exists(resolvePythonExe());
+    if (!created) {
+        progress.close();
+        if (!progress.wasCanceled()) {
+            QMessageBox::critical(this, tr("AI Setup"),
+                                  tr("Could not create the Python environment.\n\nLog: %1")
+                                          .arg(QDir::toNativeSeparators(logPath)));
+        }
+        return false;
+    }
+
+    // 2. Install dependencies. --torch-backend=auto detects the installed GPU
+    //    driver (NVIDIA/AMD/Intel) and picks the matching PyTorch build, or
+    //    falls back to CPU/MPS automatically -- same command on every
+    //    platform. Torch alone is multi-GB, so allow a long window.
+    progress.setLabelText(tr("Installing AI dependencies (several GB)…"));
+    const bool installed = runStep(resolveUvExe(),
+                                   { "pip", "install", "--python", resolvePythonExe(),
+                                    "--torch-backend", "auto", "--no-progress", "-r",
+                                    requirements },
+                                   3600000);
+    const bool canceled = progress.wasCanceled();
+    progress.close();
+
+    if (!installed) {
+        if (!canceled) {
+            QMessageBox::critical(this, tr("AI Setup"),
+                                  tr("Failed to install the AI dependencies.\n\nLog: %1")
+                                          .arg(QDir::toNativeSeparators(logPath)));
+        }
+        return false;
+    }
+    return true;
+}
+
 void QVGraphicsView::applyRetouch()
 {
     if (maskImage.isNull() || !getCurrentFileDetails().isPixmapLoaded)
         return;
 
-    const QString scriptsDir = resolveScriptsDir();
-    const QString pythonExe  = resolvePythonExe();
-
-    if (!QFile::exists(pythonExe)) {
-        int ret = QMessageBox::information(this, tr("AI Setup"), 
-            tr("This is your first time using Retouch. iqView needs to set up a local AI environment (approx. 500MB).\n\nThis may take a minute. Continue?"), 
-            QMessageBox::Yes | QMessageBox::No);
-        if (ret == QMessageBox::No) return;
-
-        QApplication::setOverrideCursor(Qt::WaitCursor);
-        
-        QProcess setup;
-        setup.setWorkingDirectory(scriptsDir);
-        // Try creating venv using system python
-        setup.start("python", QStringList() << "-m" << "venv" << ".venv");
-        if (!setup.waitForStarted() || !setup.waitForFinished(60000)) {
-            setup.start("python3", QStringList() << "-m" << "venv" << ".venv");
-            if (!setup.waitForStarted() || !setup.waitForFinished(60000)) {
-                QApplication::restoreOverrideCursor();
-                QMessageBox::critical(this, tr("Error"), tr("Could not create Python Virtual Environment. Please ensure Python is installed."));
-                return;
-            }
-        }
-
-        // Install requirements
-        setup.start(pythonExe, QStringList() << "-m" << "pip" << "install" << "-r" << "requirements.txt");
-        if (!setup.waitForStarted() || !setup.waitForFinished(300000)) { // 5 min timeout for pip
-            QApplication::restoreOverrideCursor();
-            QMessageBox::critical(this, tr("Error"), tr("Failed to install AI dependencies."));
-            return;
-        }
-        
-        QApplication::restoreOverrideCursor();
-        QMessageBox::information(this, tr("Setup Complete"), tr("AI environment is ready!"));
-    }
+    if (!ensureAiEnvironment())
+        return;
 
     QString inputPath = QDir::tempPath() + "/iqview_retouch_in.bmp";
     QString maskPath = QDir::tempPath() + "/iqview_retouch_mask.bmp";
@@ -1659,6 +1917,11 @@ void QVGraphicsView::applyCreativeFill()
         // If we have both prompt and mask, proceed to generation
     }
 
+    // The environment has to exist before checkGenerativeAccess(), which itself
+    // runs flux_fill.py through the venv interpreter.
+    if (!ensureAiEnvironment())
+        return;
+
     // First ensure access
     if (qvGetSettingString(HFToken).isEmpty()) {
         if (!checkGenerativeAccess()) return;
@@ -1839,6 +2102,9 @@ void QVGraphicsView::applyIsolate()
 {
     if (!getCurrentFileDetails().isPixmapLoaded) return;
     if (isolateState != IsolateState::Idle) return;   // already running
+
+    if (!ensureAiEnvironment())
+        return;
 
     // Prompt for HF token upfront if none stored (SAM 3 is gated)
     if (qvGetSettingString(HFToken).isEmpty()) {

@@ -40,10 +40,10 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 > **Note:** AI results are written to your temp folder until you save them. Use **Ctrl+S** to keep an edit permanently.
 
 ## Installation
-Requires **Python 3.10+** on your PATH; iqView creates its own virtual environment on first use. An NVIDIA GPU with CUDA is strongly recommended (CPU fallback works but is slow).
+No Python installation required — iqView bootstraps its own portable Python environment (via [uv](https://github.com/astral-sh/uv)) the first time you use an AI feature. An NVIDIA GPU with CUDA is strongly recommended (CPU/MPS fallback works but is slower).
 C++ code builds with **Qt 6 / CMake** on Windows, Linux, and macOS.
 
-The image viewer itself needs no setup — Python and the AI environment are only touched the first time you actually use Retouch, Creative Fill, or Isolate. Opening and browsing images works immediately, with no Hugging Face account required.
+The image viewer itself needs no setup — the AI environment is only touched the first time you actually use Retouch, Creative Fill, or Isolate. Opening and browsing images works immediately, with no Hugging Face account required.
 
 ## 🖥 Platform Support
 
@@ -51,8 +51,8 @@ The image viewer itself needs no setup — Python and the AI environment are onl
 | --- | --- | --- |
 | **Windows + NVIDIA** | ✅ | ✅ Verified — this is the primary dev environment (RTX 3090) |
 | **Windows (no NVIDIA GPU)** | ✅ | ⚠️ Works via CPU fallback, but slow |
-| **macOS** | ✅ (builds via CI) | ❓ Untested — no MPS/Metal acceleration path yet, CPU fallback only |
-| **Linux + NVIDIA** | ✅ (builds via CI) | ❓ Untested — CUDA path exists in code but hasn't been run on real Linux hardware |
+| **macOS** | ✅ (builds via CI) | ❓ Untested on real hardware, but should work — torch ships with MPS acceleration built in on Apple Silicon, and the setup flow no longer needs a pre-installed Python |
+| **Linux + NVIDIA** | ✅ (builds via CI) | ❓ Untested on real hardware — CUDA path exists in code but hasn't been run on real Linux hardware |
 | **Linux (no NVIDIA GPU)** | ✅ (builds via CI) | ⚠️ Works via CPU fallback, but slow |
 
 **Looking for testers on macOS and Linux.** The C++ viewer compiles and passes CI on all three platforms, but the Python AI pipeline (LaMa, FLUX.2, SAM 3) has only ever been run on Windows with an NVIDIA GPU. If you try iqView on Mac or Linux — even just confirming the viewer itself opens and browses images smoothly — please [open an issue](https://github.com/cyberhirsch/iqView/issues) and let us know what happened.
