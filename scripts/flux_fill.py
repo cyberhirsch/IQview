@@ -1,5 +1,8 @@
 import sys
 sys.stdout.reconfigure(encoding='utf-8')  # Windows 'charmap' can't encode arrows/dashes
+# stdin too: image paths and prompts arrive from C++ as UTF-8 and would
+# otherwise be decoded with the locale codepage, corrupting non-ASCII text.
+sys.stdin.reconfigure(encoding='utf-8')
 print("STATUS: Starting Python...", flush=True)
 
 import os
@@ -374,12 +377,6 @@ def main():
     # visible in process listings). --token remains as a manual-testing fallback.
     if not args.token:
         args.token = os.environ.get("HF_TOKEN") or None
-
-    # Diagnostic: log all received arguments so we can see exactly what C++ sent
-    print(f"STATUS: args.model={args.model!r}", flush=True)
-    print(f"STATUS: args.base_repo={args.base_repo!r}", flush=True)
-    print(f"STATUS: args.vae={args.vae!r}", flush=True)
-    print(f"STATUS: args.text_enc={args.text_enc!r}", flush=True)
 
     # Sanitize known stale legacy values. The "FLUX.2-dev" / "FLUX.1-dev" repos either
     # don't exist or aren't what we want — if anything matches, snap back to the klein defaults.

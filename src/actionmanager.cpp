@@ -194,10 +194,25 @@ QMenuBar *ActionManager::buildMenuBar(QWidget *parent)
     auto *editMenu = new QMenu(tr("&Edit"), menuBar);
 
     addCloneOfAction(editMenu, "undo");
+    addCloneOfAction(editMenu, "retouchredo");
     editMenu->addSeparator();
     addCloneOfAction(editMenu, "copy");
     addCloneOfAction(editMenu, "paste");
     addCloneOfAction(editMenu, "rename");
+    editMenu->addSeparator();
+
+    auto *rateMenu = new QMenu(tr("&Rate"), editMenu);
+    rateMenu->menuAction()->setData("rate");
+    for (int stars = 5; stars >= 1; --stars)
+        addCloneOfAction(rateMenu, QString("rate%1").arg(stars));
+    rateMenu->addSeparator();
+    addCloneOfAction(rateMenu, "rate0");
+    addCloneOfAction(rateMenu, "reject");
+    rateMenu->addSeparator();
+    addCloneOfAction(rateMenu, "exportkeepers");
+    menuCloneLibrary.insert(rateMenu->menuAction()->data().toString(), rateMenu);
+    editMenu->addMenu(rateMenu);
+
     editMenu->addSeparator();
     addCloneOfAction(editMenu, "delete");
     addCloneOfAction(editMenu, "deletepermanent");
@@ -297,6 +312,11 @@ QMenu *ActionManager::buildHelpMenu(bool addIcon, QWidget *parent)
 
     addCloneOfAction(helpMenu, "about");
     addCloneOfAction(helpMenu, "welcome");
+    helpMenu->addSeparator();
+    // Bug-reporting aids belong somewhere a first-time tester will actually
+    // look, which is Help rather than the right-click menu alone.
+    addCloneOfAction(helpMenu, "ailog");
+    addCloneOfAction(helpMenu, "debugreport");
 
     menuCloneLibrary.insert(helpMenu->menuAction()->data().toString(), helpMenu);
     return helpMenu;
@@ -604,6 +624,8 @@ void ActionManager::actionTriggered(QAction *triggeredAction, MainWindow *releva
         relevantWindow->flip();
     } else if (key == "retouchundo") {
         relevantWindow->getGraphicsView()->undoRetouch();
+    } else if (key == "retouchredo") {
+        relevantWindow->getGraphicsView()->redoRetouch();
     } else if (key == "fullscreen") {
         relevantWindow->toggleFullScreen();
     } else if (key == "firstfile") {
@@ -642,6 +664,14 @@ void ActionManager::actionTriggered(QAction *triggeredAction, MainWindow *releva
         relevantWindow->applyIsolate();
     } else if (key == "ailog") {
         relevantWindow->showAiLogWindow();
+    } else if (key == "debugreport") {
+        relevantWindow->getGraphicsView()->exportDebugReport();
+    } else if (key.startsWith("rate") && key.length() == 5 && key.at(4).isDigit()) {
+        relevantWindow->getGraphicsView()->setRatingForCurrentFile(key.at(4).digitValue());
+    } else if (key == "reject") {
+        relevantWindow->getGraphicsView()->setRatingForCurrentFile(-1);
+    } else if (key == "exportkeepers") {
+        relevantWindow->getGraphicsView()->exportKeepers();
     } else if (key == "fluxcheck") {
         relevantWindow->checkGenerativeAccess();
     } else if (key == "cancelretouch") {
@@ -713,12 +743,16 @@ void ActionManager::initializeActionLibrary()
     deletePermanentAction->setData({ "disable" });
     actionLibrary.insert("deletepermanent", deletePermanentAction);
 
-    auto *undoAction = new QAction(QIcon::fromTheme("edit-undo"), tr("&Compare Retouch"));
-#ifdef Q_OS_WIN
-    undoAction->setText(tr("&Undo Delete"));
-#endif
+    // Steps back through the AI edit history (Retouch/Fill/Isolate), paired with
+    // "redo" below. Neither the old "Compare Retouch" nor "Undo Delete" label
+    // described what this actually does now that it walks a real undo stack.
+    auto *undoAction = new QAction(QIcon::fromTheme("edit-undo"), tr("&Undo Edit"));
     undoAction->setData({ "undodisable" });
     actionLibrary.insert("undo", undoAction);
+
+    auto *redoAction = new QAction(QIcon::fromTheme("edit-redo"), tr("&Redo Edit"));
+    redoAction->setData({ "undodisable" });
+    actionLibrary.insert("retouchredo", redoAction);
 
     auto *copyAction = new QAction(QIcon::fromTheme("edit-copy"), tr("&Copy"));
     copyAction->setData({ "disable" });
@@ -864,6 +898,30 @@ void ActionManager::initializeActionLibrary()
 
     auto *aiLogAction = new QAction(tr("AI Debug Log"));
     actionLibrary.insert("ailog", aiLogAction);
+
+    auto *debugReportAction = new QAction(tr("Export Debug Report..."));
+    actionLibrary.insert("debugreport", debugReportAction);
+
+    // Culling: 0-5 set a star rating (repeating the current one clears it),
+    // X rejects. Deliberately no Pick/flag action -- P is already Pause, and
+    // XMP has no interoperable pick field anyway, so a 1-star rating serves
+    // the same purpose and actually survives export to other tools.
+    for (int stars = 0; stars <= 5; ++stars) {
+        auto *rateAction = new QAction(stars == 0 ? tr("Clear Rating")
+                                                  : tr("Rate %n Star(s)", nullptr, stars));
+        rateAction->setData({ "disable" });
+        rateAction->setShortcut(QKeySequence(Qt::Key_0 + stars));
+        actionLibrary.insert(QString("rate%1").arg(stars), rateAction);
+    }
+
+    auto *rejectAction = new QAction(tr("Re&ject"));
+    rejectAction->setData({ "disable" });
+    rejectAction->setShortcut(QKeySequence(Qt::Key_X));
+    actionLibrary.insert("reject", rejectAction);
+
+    auto *exportKeepersAction = new QAction(tr("Export &Keepers..."));
+    exportKeepersAction->setData({ "folderdisable" });
+    actionLibrary.insert("exportkeepers", exportKeepersAction);
 
     auto *increaseBrushAction = new QAction(tr("Increase Brush Size"));
     increaseBrushAction->setData({ "disable" });

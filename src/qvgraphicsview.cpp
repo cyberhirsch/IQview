@@ -1,5 +1,6 @@
 #include "qvgraphicsview.h"
 #include "ailogdialog.h"
+#include "ratingmanager.h"
 #include "variantdialog.h"
 #include <QThread>
 #include "hfauthdialog.h"
@@ -33,6 +34,15 @@
 #include <QSysInfo>
 #include <QTemporaryFile>
 #include <QDirIterator>
+#include <QCryptographicHash>
+#include <QStorageInfo>
+#include <QFileDialog>
+#include <QTextStream>
+#include <QProgressBar>
+#include <QPushButton>
+#include <QInputDialog>
+#include <QVBoxLayout>
+#include <QHBoxLayout>
 
 QVGraphicsView::QVGraphicsView(QWidget *parent) : QGraphicsView(parent)
 {
@@ -63,6 +73,8 @@ QVGraphicsView::QVGraphicsView(QWidget *parent) : QGraphicsView(parent)
     mousePressPosition = QPoint();
 
     zoomBasisScaleFactor = 1.0;
+
+    ratingManager = new RatingManager(this);
 
     connect(&imageCore, &QVImageCore::animatedFrameChanged, this,
             &QVGraphicsView::animatedFrameChanged);
@@ -110,6 +122,7 @@ void QVGraphicsView::resizeEvent(QResizeEvent *event)
     if (promptBar && promptBar->isVisible())
         repositionPromptBar();
     repositionAiStatus();
+    repositionRatingLabel();
 }
 
 void QVGraphicsView::dropEvent(QDropEvent *event)
@@ -571,7 +584,8 @@ void QVGraphicsView::makeUnscaled()
         scale(1, -1);
 
     // Reset retouch undo state for the new image
-    undoPixmap = QPixmap();
+    undoStack.clear();
+    redoStack.clear();
 
     // Reset transformation
     zoomBasis = transform();
@@ -946,6 +960,12 @@ void QVGraphicsView::toggleRetouchMode()
 
 void QVGraphicsView::exitRetouchMode()
 {
+    // Escape is bound here, so it doubles as the cancel key for a running job.
+    // If one was interrupted that is the whole action -- leave the mask and the
+    // tool as they were so the user can adjust and retry without redrawing it.
+    if (cancelAiOperation())
+        return;
+
     retouchTool = RetouchTool::Off;
     setDragMode(QGraphicsView::ScrollHandDrag);
     setMouseTracking(false);
@@ -1232,14 +1252,65 @@ bool QVGraphicsView::ensureUvInstalled(QProgressDialog &progress, const QString 
     return true;
 }
 
+// Bump when the bootstrap itself changes in a way that makes an already-built
+// environment wrong rather than merely out of date. Version 2 marks the move
+// from `python -m venv` + plain pip to uv: environments built by the old path
+// still run, but never received the platform-correct onnxruntime or the
+// driver-matched PyTorch build, so they are worth rebuilding once.
+static const int AI_BOOTSTRAP_VERSION = 2;
+
+QString QVGraphicsView::resolveEnvStampPath()
+{
+    return resolveVenvDir() + "/.iqview-env-stamp";
+}
+
+// Identity of the environment the current source tree would produce: the
+// bootstrap version plus a hash of requirements.txt. Anything other than an
+// exact match against the stored stamp means the installed environment is
+// stale -- which is how the missing-torchvision bug went unnoticed, since
+// dependencies were only ever installed on the run that created the venv.
+QString QVGraphicsView::currentEnvStamp()
+{
+    QByteArray hash;
+    QFile requirements(resolveScriptsDir() + "/requirements.txt");
+    if (requirements.open(QIODevice::ReadOnly)) {
+        hash = QCryptographicHash::hash(requirements.readAll(), QCryptographicHash::Sha256)
+                       .toHex();
+    }
+    return QString("%1:%2").arg(AI_BOOTSTRAP_VERSION).arg(QString::fromLatin1(hash));
+}
+
+// Warn before starting a multi-GB download onto a drive that cannot hold it.
+// Returns false only if the user chooses to stop; a low estimate is a warning
+// rather than a hard block, since the requirement is approximate.
+bool QVGraphicsView::confirmDiskSpace(const QString &targetDir, qint64 requiredBytes)
+{
+    QDir().mkpath(targetDir);
+    const QStorageInfo storage(targetDir);
+    if (!storage.isValid() || !storage.isReady())
+        return true;   // can't tell -- don't get in the way
+
+    const qint64 available = storage.bytesAvailable();
+    if (available >= requiredBytes)
+        return true;
+
+    const auto gb = [](qint64 bytes) { return QString::number(bytes / 1073741824.0, 'f', 1); };
+    return QMessageBox::warning(
+                   this, tr("AI Setup"),
+                   tr("Setting up the AI environment needs roughly %1 GB, but only %2 GB is "
+                      "free on %3.\n\nThe download will fail part-way through if it runs out "
+                      "of space.\n\nContinue anyway?")
+                           .arg(gb(requiredBytes), gb(available),
+                                QDir::toNativeSeparators(storage.rootPath())),
+                   QMessageBox::Yes | QMessageBox::No, QMessageBox::No)
+            == QMessageBox::Yes;
+}
+
 // First-run setup, shared by every AI feature. Creates the Python environment
 // and installs dependencies, reporting progress as it goes. Returns true when
 // the environment is ready to use.
 bool QVGraphicsView::ensureAiEnvironment()
 {
-    if (QFile::exists(resolvePythonExe()))
-        return true;
-
     const QString requirements = resolveScriptsDir() + "/requirements.txt";
     if (!QFile::exists(requirements)) {
         QMessageBox::critical(this, tr("AI Setup"),
@@ -1249,17 +1320,58 @@ bool QVGraphicsView::ensureAiEnvironment()
         return false;
     }
 
-    if (QMessageBox::question(
-                this, tr("AI Setup"),
-                tr("iqView needs to set up a local Python environment before it can use "
-                   "its AI features.\n\nThis downloads several GB and can take 10–20 minutes, "
-                   "but only happens once.\n\nSet it up now?"),
-                QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes)
-        != QMessageBox::Yes)
+    const bool haveInterpreter = QFile::exists(resolvePythonExe());
+    const QString wantStamp = currentEnvStamp();
+    QString haveStamp;
+    QFile stampFile(resolveEnvStampPath());
+    if (stampFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        haveStamp = QString::fromUtf8(stampFile.readAll()).trimmed();
+        stampFile.close();
+    }
+
+    if (haveInterpreter && haveStamp == wantStamp)
+        return true;
+
+    // An interpreter with a stale stamp only needs its dependencies refreshed,
+    // not a rebuild from scratch -- much faster, and uv skips anything already
+    // at the right version.
+    const bool refreshOnly = haveInterpreter;
+
+    if (refreshOnly && declinedEnvStamp == wantStamp)
+        return true;   // asked already this session; carry on with what's installed
+
+    if (refreshOnly) {
+        if (QMessageBox::question(
+                    this, tr("AI Setup"),
+                    tr("iqView's AI dependencies have changed since this environment was "
+                       "set up.\n\nUpdating keeps the AI features working correctly. It "
+                       "downloads only what changed, and you can keep using the current "
+                       "setup if you skip it.\n\nUpdate now?"),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes)
+            != QMessageBox::Yes) {
+            declinedEnvStamp = wantStamp;
+            return true;   // their existing environment still works
+        }
+    } else if (QMessageBox::question(
+                       this, tr("AI Setup"),
+                       tr("iqView needs to set up a local Python environment before it can use "
+                          "its AI features.\n\nThis downloads several GB and can take 10–20 "
+                          "minutes, but only happens once.\n\nSet it up now?"),
+                       QMessageBox::Yes | QMessageBox::No, QMessageBox::Yes)
+               != QMessageBox::Yes) {
         return false;
+    }
 
     const QString venvDir = resolveVenvDir();
     QDir().mkpath(QFileInfo(venvDir).absolutePath());
+
+    // uv stages downloads in its cache before linking them into the venv, so
+    // peak usage is roughly double the installed size. A CUDA PyTorch build
+    // alone is ~2.5 GB; 10 GB covers a full install with headroom, and a
+    // refresh only re-fetches what changed.
+    if (!confirmDiskSpace(QFileInfo(venvDir).absolutePath(),
+                          refreshOnly ? 3LL * 1073741824LL : 10LL * 1073741824LL))
+        return false;
 
     const QString logPath = resolveLogPath();
     QDir().mkpath(QFileInfo(logPath).absolutePath());
@@ -1338,18 +1450,20 @@ bool QVGraphicsView::ensureAiEnvironment()
     //    cancelled/crashed/interrupted attempt -- without it, uv refuses to
     //    reuse a non-empty directory and setup fails permanently every time
     //    afterward until the user manually deletes it.
-    progress.setLabelText(tr("Creating Python environment…"));
-    const bool created =
-            runStep(resolveUvExe(), { "venv", "--python", "3.12", "--clear", venvDir }, 600000)
-            && QFile::exists(resolvePythonExe());
-    if (!created) {
-        progress.close();
-        if (!progress.wasCanceled()) {
-            QMessageBox::critical(this, tr("AI Setup"),
-                                  tr("Could not create the Python environment.\n\nLog: %1")
-                                          .arg(QDir::toNativeSeparators(logPath)));
+    if (!refreshOnly) {
+        progress.setLabelText(tr("Creating Python environment…"));
+        const bool created =
+                runStep(resolveUvExe(), { "venv", "--python", "3.12", "--clear", venvDir }, 600000)
+                && QFile::exists(resolvePythonExe());
+        if (!created) {
+            progress.close();
+            if (!progress.wasCanceled()) {
+                QMessageBox::critical(this, tr("AI Setup"),
+                                      tr("Could not create the Python environment.\n\nLog: %1")
+                                              .arg(QDir::toNativeSeparators(logPath)));
+            }
+            return false;
         }
-        return false;
     }
 
     // 2. Install dependencies. --torch-backend=auto detects the installed GPU
@@ -1363,7 +1477,8 @@ bool QVGraphicsView::ensureAiEnvironment()
     //    long stretches. In its place, a heartbeat timer reports the venv's
     //    on-disk size every couple of seconds, so there's always visible
     //    movement even during silent multi-minute downloads.
-    progress.setLabelText(tr("Installing AI dependencies (several GB)…"));
+    progress.setLabelText(refreshOnly ? tr("Updating AI dependencies…")
+                                      : tr("Installing AI dependencies (several GB)…"));
     QTimer sizeHeartbeat;
     sizeHeartbeat.setInterval(2000);
     connect(&sizeHeartbeat, &QTimer::timeout, &progress, [&]() {
@@ -1397,7 +1512,14 @@ bool QVGraphicsView::ensureAiEnvironment()
                                   tr("Failed to install the AI dependencies.\n\nLog: %1")
                                           .arg(QDir::toNativeSeparators(logPath)));
         }
+        // Deliberately leave the stamp untouched on failure so the next attempt
+        // still sees the environment as stale and retries.
         return false;
+    }
+
+    if (stampFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        stampFile.write(wantStamp.toUtf8());
+        stampFile.close();
     }
     return true;
 }
@@ -1410,13 +1532,17 @@ void QVGraphicsView::applyRetouch()
     if (!ensureAiEnvironment())
         return;
 
-    QString inputPath = QDir::tempPath() + "/iqview_retouch_in.bmp";
+    // PNG rather than BMP for the image round-trip: BMP cannot carry an alpha
+    // channel, so retouching the transparent output of Isolate would silently
+    // flatten the cutout back to an opaque rectangle. The mask stays BMP —
+    // it is pure 8-bit coverage and never has alpha.
+    QString inputPath = QDir::tempPath() + "/iqview_retouch_in.png";
     QString maskPath = QDir::tempPath() + "/iqview_retouch_mask.bmp";
-    QString outputPath = uniqueAiOutputPath("iqview_retouch_out", "bmp",
+    QString outputPath = uniqueAiOutputPath("iqview_retouch_out", "png",
                                             getCurrentFileDetails().fileInfo.absoluteFilePath());
 
-    undoPixmap = loadedPixmapItem->pixmap();
-    loadedPixmapItem->pixmap().save(inputPath, "BMP");
+    pushUndoState(loadedPixmapItem->pixmap());
+    loadedPixmapItem->pixmap().save(inputPath, "PNG");
     maskImage.save(maskPath, "BMP");
 
     pendingOutputPath = outputPath;
@@ -1441,7 +1567,9 @@ void QVGraphicsView::applyRetouch()
     }
 
     if (isWorkerReady) {
+        activeAiJob = AiJob::Retouch;
         workerProcess->write(QString("%1|%2|%3\n").arg(inputPath, maskPath, outputPath).toUtf8());
+        showAiStatus(tr("Retouching…"));
     } else {
         QApplication::restoreOverrideCursor();
         QMessageBox::critical(this, tr("AI Error"), tr("The AI service failed to start in time."));
@@ -1520,6 +1648,7 @@ void QVGraphicsView::handleWorkerOutput()
             silentWorkerStart = false;
             hideAiStatus();
         } else if (line == "DONE") {
+            activeAiJob = AiJob::None;
             hideAiStatus();
             QApplication::restoreOverrideCursor();
             beginAiResultLoad(pendingOutputPath);
@@ -1533,6 +1662,7 @@ void QVGraphicsView::handleWorkerOutput()
             // the normal cold-start path (with its own error handling) later.
             const bool wasSilentPrefetch = silentWorkerStart;
             silentWorkerStart = false;
+            activeAiJob = AiJob::None;
             hideAiStatus();
             QApplication::restoreOverrideCursor();
             if (!wasSilentPrefetch)
@@ -1552,44 +1682,151 @@ void QVGraphicsView::repositionPromptBar()
 
 void QVGraphicsView::showAiStatus(const QString &text)
 {
-    if (!aiStatusLabel) {
-        aiStatusLabel = new QLabel(this);
+    if (!aiStatusWidget) {
+        aiStatusWidget = new QWidget(this);
+        aiStatusWidget->setStyleSheet(
+            "QWidget {"
+            "  background: rgba(20, 20, 20, 210);"
+            "  border-radius: 8px;"
+            "}");
+
+        aiStatusLabel = new QLabel(aiStatusWidget);
         aiStatusLabel->setAlignment(Qt::AlignCenter);
         aiStatusLabel->setStyleSheet(
             "QLabel {"
-            "  background: rgba(20, 20, 20, 210);"
+            "  background: transparent;"
             "  color: #e0e0e0;"
-            "  border: 1px solid rgba(120, 120, 120, 130);"
-            "  border-radius: 8px;"
-            "  padding: 7px 18px;"
             "  font-size: 13px;"
             "}"
         );
-        aiStatusLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+
+        // Indeterminate: none of the workers report a completion fraction, but
+        // a moving bar still distinguishes "working" from "hung", which is the
+        // question a user actually has during a silent multi-minute step.
+        aiProgressBar = new QProgressBar(aiStatusWidget);
+        aiProgressBar->setRange(0, 0);
+        aiProgressBar->setTextVisible(false);
+        aiProgressBar->setFixedHeight(4);
+        aiProgressBar->setStyleSheet(
+            "QProgressBar {"
+            "  background: rgba(255, 255, 255, 30);"
+            "  border: none;"
+            "  border-radius: 2px;"
+            "}"
+            "QProgressBar::chunk {"
+            "  background: #4a9eff;"
+            "  border-radius: 2px;"
+            "}"
+        );
+
+        aiCancelButton = new QPushButton(tr("Cancel"), aiStatusWidget);
+        aiCancelButton->setCursor(Qt::ArrowCursor);
+        aiCancelButton->setStyleSheet(
+            "QPushButton {"
+            "  background: rgba(255, 255, 255, 26);"
+            "  color: #e0e0e0;"
+            "  border: 1px solid rgba(150, 150, 150, 120);"
+            "  border-radius: 4px;"
+            "  padding: 3px 12px;"
+            "  font-size: 12px;"
+            "}"
+            "QPushButton:hover { background: rgba(255, 255, 255, 46); }"
+        );
+        connect(aiCancelButton, &QPushButton::clicked, this,
+                [this]() { cancelAiOperation(); });
+
+        auto *bottomRow = new QHBoxLayout;
+        bottomRow->setContentsMargins(0, 0, 0, 0);
+        bottomRow->addWidget(aiProgressBar, 1);
+        bottomRow->addWidget(aiCancelButton, 0);
+
+        auto *layout = new QVBoxLayout(aiStatusWidget);
+        layout->setContentsMargins(16, 10, 16, 10);
+        layout->setSpacing(8);
+        layout->addWidget(aiStatusLabel);
+        layout->addLayout(bottomRow);
+
+        aiStatusWidget->setStyleSheet(aiStatusWidget->styleSheet()
+                                     + "QWidget#aiStatusPanel { border: 1px solid rgba(120, 120, 120, 130); }");
+        aiStatusWidget->setObjectName("aiStatusPanel");
     }
+
     aiStatusLabel->setText(text);
-    aiStatusLabel->adjustSize();
+    // Only offer Cancel when there is a job to cancel: the HUD is also used for
+    // the silent idle prefetch and for plain status text.
+    aiCancelButton->setVisible(activeAiJob != AiJob::None);
     repositionAiStatus();
-    aiStatusLabel->show();
-    aiStatusLabel->raise();
+    aiStatusWidget->show();
+    aiStatusWidget->raise();
 }
 
 void QVGraphicsView::hideAiStatus()
 {
-    if (aiStatusLabel)
-        aiStatusLabel->hide();
+    if (aiStatusWidget)
+        aiStatusWidget->hide();
 }
 
 void QVGraphicsView::repositionAiStatus()
 {
-    if (!aiStatusLabel || !aiStatusLabel->isVisible()) return;
-    aiStatusLabel->adjustSize();
-    const int x = (width() - aiStatusLabel->width()) / 2;
+    if (!aiStatusWidget || !aiStatusWidget->isVisible()) return;
+
+    const int panelWidth = qMin(560, qMax(280, width() - 80));
+    aiStatusWidget->setFixedWidth(panelWidth);
+    aiStatusWidget->adjustSize();
+
+    const int x = (width() - aiStatusWidget->width()) / 2;
     // Sit above the prompt bar if visible, otherwise 24px from the bottom
     const int bottomAnchor = (promptBar && promptBar->isVisible())
                              ? promptBar->y() - 8
                              : height() - 24;
-    aiStatusLabel->move(x, bottomAnchor - aiStatusLabel->height());
+    aiStatusWidget->move(x, bottomAnchor - aiStatusWidget->height());
+}
+
+// Interrupts whatever AI job is in flight. None of the workers implement a
+// cancel command -- they block inside a single inference or download call --
+// so terminating the process is the only way out. Signals are disconnected
+// first so the resulting "process died" handlers don't fire and report a
+// deliberate cancellation as an error.
+bool QVGraphicsView::cancelAiOperation()
+{
+    if (activeAiJob == AiJob::None)
+        return false;
+
+    const auto stop = [](QProcess *&proc) {
+        if (!proc)
+            return;
+        proc->disconnect();
+        proc->kill();
+        proc->waitForFinished(2000);
+        proc->deleteLater();
+        proc = nullptr;
+    };
+
+    switch (activeAiJob) {
+    case AiJob::Retouch:
+        stop(workerProcess);
+        isWorkerReady = false;
+        pendingOutputPath.clear();
+        break;
+    case AiJob::Fill:
+        stop(fluxProcess);
+        fluxLoadedModelId.clear();
+        fluxBatchExpected = 1;
+        fluxBatchResults.clear();
+        break;
+    case AiJob::Isolate:
+        stop(isolateProcess);
+        isolateState = IsolateState::Idle;
+        break;
+    case AiJob::None:
+        break;
+    }
+
+    activeAiJob = AiJob::None;
+    silentWorkerStart = false;
+    hideAiStatus();
+    QApplication::restoreOverrideCursor();
+    return true;
 }
 
 void QVGraphicsView::changeBrushSize(int delta)
@@ -1633,14 +1870,38 @@ void QVGraphicsView::drawForeground(QPainter *painter, const QRectF &rect)
     }
 }
 
+void QVGraphicsView::pushUndoState(const QPixmap &pixmap)
+{
+    if (pixmap.isNull())
+        return;
+
+    undoStack.append(pixmap);
+    while (undoStack.size() > MAX_UNDO_STEPS)
+        undoStack.removeFirst();
+
+    // Starting a new edit invalidates anything that was undone before it.
+    redoStack.clear();
+}
+
 bool QVGraphicsView::undoRetouch()
 {
-    if (undoPixmap.isNull()) return false;
-    
-    QPixmap current = loadedPixmapItem->pixmap();
-    loadedPixmapItem->setPixmap(undoPixmap);
-    undoPixmap = current;
-    
+    if (undoStack.isEmpty()) return false;
+
+    redoStack.append(loadedPixmapItem->pixmap());
+    loadedPixmapItem->setPixmap(undoStack.takeLast());
+
+    updateMaskItem();
+    viewport()->update();
+    return true;
+}
+
+bool QVGraphicsView::redoRetouch()
+{
+    if (redoStack.isEmpty()) return false;
+
+    undoStack.append(loadedPixmapItem->pixmap());
+    loadedPixmapItem->setPixmap(redoStack.takeLast());
+
     updateMaskItem();
     viewport()->update();
     return true;
@@ -1878,9 +2139,10 @@ void QVGraphicsView::handleFluxOutput()
                 continue;
             }
 
+            activeAiJob = AiJob::None;
             hideAiStatus();
             // Capture the current (original) pixmap for undo before loadFile replaces it.
-            undoPixmap = loadedPixmapItem->pixmap();
+            pushUndoState(loadedPixmapItem->pixmap());
             // Load result into imageCore — same as the LaMa pipeline does.
             // Direct setPixmap() on the scene item would be overwritten 50 ms later
             // by scaleExpensively(), which scales imageCore's (original) pixmap.
@@ -1891,6 +2153,7 @@ void QVGraphicsView::handleFluxOutput()
         } else if (line.startsWith("BATCH_DONE")) {
             finishFluxBatch();
         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
+            activeAiJob = AiJob::None;
             hideAiStatus();
             fluxBatchExpected = 1;
             fluxBatchResults.clear();
@@ -1904,6 +2167,7 @@ void QVGraphicsView::handleFluxOutput()
 // then discard the rest.
 void QVGraphicsView::finishFluxBatch()
 {
+    activeAiJob = AiJob::None;
     hideAiStatus();
     QApplication::restoreOverrideCursor();
 
@@ -1927,7 +2191,7 @@ void QVGraphicsView::finishFluxBatch()
     if (chosen.isEmpty())
         return;   // cancelled — leave the original image untouched
 
-    undoPixmap = loadedPixmapItem->pixmap();
+    pushUndoState(loadedPixmapItem->pixmap());
     beginAiResultLoad(chosen);
     exitRetouchMode();
 }
@@ -2000,6 +2264,7 @@ void QVGraphicsView::applyCreativeFill()
     QString cmd = QString("%1|%2|%3|%4|%5\n")
                           .arg(inputPath, maskPath, prompt, outputPath)
                           .arg(batchCount);
+    activeAiJob = AiJob::Fill;
     fluxProcess->write(cmd.toUtf8());
 }
 
@@ -2031,6 +2296,276 @@ void QVGraphicsView::showAiLogWindow()
 }
 
 // ============================================================================
+// Culling — star ratings and rejections, persisted as XMP sidecars
+// ============================================================================
+
+int QVGraphicsView::ratingForCurrentFile()
+{
+    if (!getCurrentFileDetails().isPixmapLoaded)
+        return RatingManager::Unrated;
+    return ratingManager->rating(getCurrentFileDetails().fileInfo.absoluteFilePath());
+}
+
+void QVGraphicsView::setRatingForCurrentFile(int rating)
+{
+    if (!getCurrentFileDetails().isPixmapLoaded)
+        return;
+
+    const QString path = getCurrentFileDetails().fileInfo.absoluteFilePath();
+
+    // Pressing the rating a file already has clears it instead, which is how
+    // every culling tool behaves and saves reaching for a separate key.
+    if (rating > 0 && ratingManager->rating(path) == rating)
+        rating = RatingManager::Unrated;
+
+    if (!ratingManager->setRating(path, rating)) {
+        showRatingFeedback(RatingManager::Unrated);
+        QMessageBox::warning(this, tr("Rating"),
+                             tr("Could not write the rating for this image.\n\n"
+                                "iqView stores ratings in an XMP sidecar next to the image, "
+                                "so the folder needs to be writable."));
+        return;
+    }
+    showRatingFeedback(rating);
+}
+
+void QVGraphicsView::showRatingFeedback(int rating)
+{
+    if (!ratingLabel) {
+        ratingLabel = new QLabel(this);
+        ratingLabel->setAlignment(Qt::AlignCenter);
+        ratingLabel->setAttribute(Qt::WA_TransparentForMouseEvents);
+        ratingLabel->setStyleSheet(
+            "QLabel {"
+            "  background: rgba(20, 20, 20, 210);"
+            "  color: #e0e0e0;"
+            "  border: 1px solid rgba(120, 120, 120, 130);"
+            "  border-radius: 8px;"
+            "  padding: 6px 16px;"
+            "  font-size: 18px;"
+            "}");
+
+        ratingLabelTimer = new QTimer(this);
+        ratingLabelTimer->setSingleShot(true);
+        ratingLabelTimer->setInterval(1200);
+        connect(ratingLabelTimer, &QTimer::timeout, this, [this]() { ratingLabel->hide(); });
+    }
+
+    QString text;
+    if (rating == RatingManager::Rejected)
+        text = tr("✕  Rejected");
+    else if (rating == RatingManager::Unrated)
+        text = tr("Unrated");
+    else
+        text = QString("★").repeated(rating) + QString("☆").repeated(RatingManager::MaxStars - rating);
+
+    ratingLabel->setText(text);
+    ratingLabel->adjustSize();
+    repositionRatingLabel();
+    ratingLabel->show();
+    ratingLabel->raise();
+    ratingLabelTimer->start();
+}
+
+void QVGraphicsView::repositionRatingLabel()
+{
+    if (!ratingLabel || !ratingLabel->isVisible())
+        return;
+    ratingLabel->adjustSize();
+    // Top centre, clear of the AI status HUD which lives along the bottom.
+    ratingLabel->move((width() - ratingLabel->width()) / 2, 24);
+}
+
+// Copies everything in the current folder rated at or above a threshold into a
+// folder of the user's choosing. The point of culling is getting the keepers
+// somewhere else; without this the ratings would just sit there.
+void QVGraphicsView::exportKeepers()
+{
+    const auto &files = getCurrentFileDetails().folderFileInfoList;
+    if (files.isEmpty()) {
+        QMessageBox::information(this, tr("Export Keepers"), tr("No folder is open."));
+        return;
+    }
+
+    bool ok = false;
+    const int threshold = QInputDialog::getInt(
+            this, tr("Export Keepers"),
+            tr("Copy images rated at least this many stars:"), 1, 1,
+            RatingManager::MaxStars, 1, &ok);
+    if (!ok)
+        return;
+
+    QStringList keepers;
+    for (const auto &file : files) {
+        if (ratingManager->rating(file.absoluteFilePath) >= threshold)
+            keepers << file.absoluteFilePath;
+    }
+
+    if (keepers.isEmpty()) {
+        QMessageBox::information(
+                this, tr("Export Keepers"),
+                tr("No images in this folder are rated %n star(s) or higher.", nullptr,
+                   threshold));
+        return;
+    }
+
+    const QString destination = QFileDialog::getExistingDirectory(
+            this, tr("Choose a destination folder for %1 image(s)").arg(keepers.size()));
+    if (destination.isEmpty())
+        return;
+
+    int copied = 0;
+    QStringList failed;
+    for (const QString &source : keepers) {
+        const QFileInfo info(source);
+        QString target = QDir(destination).filePath(info.fileName());
+
+        // Never overwrite: a name collision gets a numeric suffix instead.
+        int suffix = 1;
+        while (QFile::exists(target)) {
+            target = QDir(destination).filePath(QString("%1 (%2).%3")
+                                                        .arg(info.completeBaseName())
+                                                        .arg(suffix++)
+                                                        .arg(info.suffix()));
+        }
+
+        if (QFile::copy(source, target)) {
+            ++copied;
+            // Bring the sidecar along so the ratings survive the move.
+            const QString sidecar = RatingManager::sidecarPath(source);
+            if (QFile::exists(sidecar)) {
+                QFile::copy(sidecar,
+                            RatingManager::sidecarPath(target));
+            }
+        } else {
+            failed << info.fileName();
+        }
+    }
+
+    if (failed.isEmpty()) {
+        QMessageBox::information(
+                this, tr("Export Keepers"),
+                tr("Copied %1 image(s) to:\n%2")
+                        .arg(copied)
+                        .arg(QDir::toNativeSeparators(destination)));
+    } else {
+        QMessageBox::warning(this, tr("Export Keepers"),
+                             tr("Copied %1 image(s), but %2 could not be copied:\n\n%3")
+                                     .arg(copied)
+                                     .arg(failed.size())
+                                     .arg(failed.mid(0, 10).join("\n")));
+    }
+}
+
+// Collects everything needed to diagnose an AI problem into one text file the
+// user can attach to a bug report. Testers on macOS and Linux have no idea
+// where these logs live, and collecting them one at a time over several
+// round-trips is the slowest part of diagnosing anything remotely. Plain text
+// rather than a zip so it can also just be pasted into an issue.
+void QVGraphicsView::exportDebugReport()
+{
+    const QString suggested =
+            QDir(QStandardPaths::writableLocation(QStandardPaths::DesktopLocation))
+                    .filePath(QString("iqview-debug-%1.txt")
+                                      .arg(QDateTime::currentDateTime().toString(
+                                              "yyyyMMdd-HHmmss")));
+    const QString path = QFileDialog::getSaveFileName(this, tr("Export Debug Report"), suggested,
+                                                      tr("Text Files (*.txt)"));
+    if (path.isEmpty())
+        return;
+
+    QString report;
+    QTextStream out(&report);
+
+    out << "iqView debug report\n"
+        << "Generated: " << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n\n";
+
+    out << "== Environment ==\n"
+        << "iqView:      " << QCoreApplication::applicationVersion() << "\n"
+        << "Qt:          " << qVersion() << " (built against " << QT_VERSION_STR << ")\n"
+        << "OS:          " << QSysInfo::prettyProductName() << "\n"
+        << "Kernel:      " << QSysInfo::kernelType() << " " << QSysInfo::kernelVersion() << "\n"
+        << "CPU arch:    " << QSysInfo::currentCpuArchitecture() << "\n\n";
+
+    out << "== Paths ==\n";
+    const auto describe = [&](const QString &label, const QString &value) {
+        out << label.leftJustified(13) << QDir::toNativeSeparators(value)
+            << (QFileInfo::exists(value) ? "  [present]" : "  [MISSING]") << "\n";
+    };
+    describe("scripts:", resolveScriptsDir());
+    describe("venv:", resolveVenvDir());
+    describe("python:", resolvePythonExe());
+    describe("uv:", resolveUvExe());
+    describe("models:", resolveModelsDir());
+
+    // Free space matters: a truncated download is a common failure mode and
+    // is invisible in the logs themselves.
+    const QStorageInfo storage(QFileInfo(resolveVenvDir()).absolutePath());
+    if (storage.isValid() && storage.isReady()) {
+        out << "free space:  " << storage.bytesAvailable() / 1048576 << " MB on "
+            << QDir::toNativeSeparators(storage.rootPath()) << "\n";
+    }
+
+    QString stamp;
+    QFile stampFile(resolveEnvStampPath());
+    if (stampFile.open(QIODevice::ReadOnly | QIODevice::Text))
+        stamp = QString::fromUtf8(stampFile.readAll()).trimmed();
+    out << "env stamp:   " << (stamp.isEmpty() ? QStringLiteral("(none)") : stamp) << "\n"
+        << "expected:    " << currentEnvStamp() << "\n\n";
+
+    // Deliberately not included: the Hugging Face token. It lives in QSettings
+    // right next to everything else here and would otherwise be pasted into a
+    // public issue by anyone following the instructions.
+    out << "HF token:    " << (qvGetSettingString(HFToken).isEmpty() ? "not set" : "set (value withheld)")
+        << "\n\n";
+
+    const QString tempDir = QDir::tempPath();
+    const QList<QPair<QString, QString>> logs = {
+        { "Flux / Isolate", resolveLogPath() },
+        { "LaMa Worker", QDir(tempDir).filePath("iqview_worker_log.txt") },
+        { "Retouch Session", QDir(tempDir).filePath("iqview_retouch_log.txt") },
+    };
+
+    // Tail only -- these files are append-only and can reach many MB, but the
+    // interesting part is always the most recent run.
+    constexpr qint64 LOG_TAIL_BYTES = 64 * 1024;
+    for (const auto &entry : logs) {
+        out << "== Log: " << entry.first << " ==\n"
+            << QDir::toNativeSeparators(entry.second) << "\n";
+        QFile file(entry.second);
+        if (!file.exists()) {
+            out << "(does not exist)\n\n";
+            continue;
+        }
+        if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+            out << "(could not be opened)\n\n";
+            continue;
+        }
+        if (file.size() > LOG_TAIL_BYTES) {
+            file.seek(file.size() - LOG_TAIL_BYTES);
+            out << "(truncated to the last " << LOG_TAIL_BYTES / 1024 << " KB of "
+                << file.size() / 1024 << " KB)\n";
+        }
+        out << QString::fromUtf8(file.readAll()) << "\n\n";
+    }
+
+    QFile outFile(path);
+    if (!outFile.open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+        QMessageBox::warning(this, tr("Export Debug Report"),
+                             tr("Could not write to %1").arg(QDir::toNativeSeparators(path)));
+        return;
+    }
+    outFile.write(report.toUtf8());
+    outFile.close();
+
+    QMessageBox::information(
+            this, tr("Export Debug Report"),
+            tr("Debug report saved to:\n%1\n\nAttach this file to your bug report. It contains "
+               "no Hugging Face token or image data.")
+                    .arg(QDir::toNativeSeparators(path)));
+}
+
+// ============================================================================
 // Isolate — SAM 3 background removal / subject isolation
 // ============================================================================
 
@@ -2053,6 +2588,7 @@ void QVGraphicsView::ensureIsolateStarted()
             return;
         hideAiStatus();
         isolateState = IsolateState::Idle;
+        activeAiJob = AiJob::None;
         QApplication::restoreOverrideCursor();
         QMessageBox::critical(this, tr("Isolate Error"),
                               tr("The AI service failed to start: %1\n\n"
@@ -2091,6 +2627,7 @@ void QVGraphicsView::handleIsolateOutput()
             // SAM 3 is gated — reuse the Flux auth dialog to collect a token
             hideAiStatus();
             isolateState = IsolateState::Idle;
+            activeAiJob = AiJob::None;
             QApplication::restoreOverrideCursor();
             if (isolateProcess) { isolateProcess->kill(); isolateProcess->deleteLater(); isolateProcess = nullptr; }
 
@@ -2110,14 +2647,16 @@ void QVGraphicsView::handleIsolateOutput()
             hideAiStatus();
             // Load via imageCore (not setPixmap) so a later scaleExpensively()
             // doesn't restore the original image over the result.
-            undoPixmap = loadedPixmapItem->pixmap();
+            pushUndoState(loadedPixmapItem->pixmap());
             beginAiResultLoad(line.mid(8).trimmed());
             isolateState = IsolateState::Idle;
+            activeAiJob = AiJob::None;
             QApplication::restoreOverrideCursor();
 
         } else if (line.startsWith("ERROR:") || line.startsWith("FATAL:")) {
             hideAiStatus();
             isolateState = IsolateState::Idle;
+            activeAiJob = AiJob::None;
             QApplication::restoreOverrideCursor();
             QString msg = line.mid(line.indexOf(':') + 1).trimmed();
             // Treat any gated-access error the same as ACCESS_GATED
@@ -2163,6 +2702,7 @@ void QVGraphicsView::applyIsolate()
     ensureIsolateStarted();
 
     isolateState = IsolateState::WaitingForResult;
+    activeAiJob = AiJob::Isolate;
     showAiStatus(tr("Removing background with SAM 3..."));
     QApplication::setOverrideCursor(Qt::WaitCursor);
 

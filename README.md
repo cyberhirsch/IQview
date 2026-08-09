@@ -28,16 +28,30 @@ While original qView is a fantastic minimalist viewer, **iqView** expands it int
 | **G** | Creative Fill: mask + prompt | FLUX.2 klein |
 | **S** | Isolate: remove the background | SAM 3 |
 | **Enter** | Apply Retouch / Confirm | - |
-| **Esc** | Cancel / Exit Mode | - |
+| **Esc** | Cancel current AI job / Exit Mode | - |
 | **Middle Click** | Apply Retouch (Quick Action) | - |
 | **Right Click** | Cancel Retouch (Quick Action) | - |
 | **[ / ]** | Adjust Brush Size | - |
-| **Ctrl+Z** | Undo / Compare | - |
+| **1**–**5** | Star rating (press the same number again to clear) | - |
+| **0** | Clear rating | - |
+| **X** | Reject | - |
+| **Ctrl+Z** | Undo edit (up to 5 steps) | - |
+| **Ctrl+Shift+Z** | Redo edit | - |
 | **Ctrl+S** | Save Image (offers to overwrite the original after an AI edit) | - |
 | **Ctrl+Shift+S** | Save Image As... | - |
 | **Ctrl+F** | Flip Image | - |
 
 > **Note:** AI results are written to your temp folder until you save them. Use **Ctrl+S** to keep an edit permanently.
+
+## 🌟 Culling
+Rate while you browse: **1**–**5** for stars, **X** to reject, **0** to clear (pressing a
+number the image already has clears it too). Ratings are written to XMP sidecar files next to
+each image, using the same `xmp:Rating` convention Lightroom, Bridge, digiKam and Photo
+Mechanic read — so culling here and finishing elsewhere works, and nothing is locked inside
+iqView.
+
+**Edit → Rate → Export Keepers...** copies every image at or above a star threshold into a
+folder of your choosing, sidecars included.
 
 ## Installation
 No Python installation required — iqView bootstraps its own portable Python environment (via [uv](https://github.com/astral-sh/uv)) the first time you use an AI feature. An NVIDIA GPU with CUDA is strongly recommended (CPU/MPS fallback works but is slower).
@@ -54,6 +68,10 @@ The image viewer itself needs no setup — the AI environment is only touched th
 | **macOS** | ✅ (builds via CI) | ❓ Untested on real hardware, but should work — torch ships with MPS acceleration built in on Apple Silicon, and the setup flow no longer needs a pre-installed Python |
 | **Linux + NVIDIA** | ✅ (builds via CI) | ❓ Untested on real hardware — CUDA path exists in code but hasn't been run on real Linux hardware |
 | **Linux (no NVIDIA GPU)** | ✅ (builds via CI) | ⚠️ Works via CPU fallback, but slow |
+
+If something goes wrong with the AI features, **Help → Export Debug Report...** writes a single
+text file with your platform details, environment paths and the tail of every AI log. Attach it
+to an issue — it deliberately excludes your Hugging Face token and any image data.
 
 **Looking for testers on macOS and Linux.** The C++ viewer compiles and passes CI on all three platforms, but the Python AI pipeline (LaMa, FLUX.2, SAM 3) has only ever been run on Windows with an NVIDIA GPU. If you try iqView on Mac or Linux — even just confirming the viewer itself opens and browses images smoothly — please [open an issue](https://github.com/cyberhirsch/iqView/issues) and let us know what happened.
 

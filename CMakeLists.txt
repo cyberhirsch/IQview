@@ -66,6 +66,7 @@ set(PROJECT_SOURCES
     src/hfauthdialog.cpp
     src/retouchpromptbar.cpp
     src/ailogdialog.cpp
+    src/ratingmanager.cpp
     src/variantdialog.cpp
 )
 
@@ -88,6 +89,7 @@ set(PROJECT_HEADERS
     src/hfauthdialog.h
     src/retouchpromptbar.h
     src/ailogdialog.h
+    src/ratingmanager.h
     src/variantdialog.h
 )
 

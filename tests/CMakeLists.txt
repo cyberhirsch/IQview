@@ -24,6 +24,7 @@ set(TEST_SOURCES
     ../src/hfauthdialog.cpp
     ../src/retouchpromptbar.cpp
     ../src/ailogdialog.cpp
+    ../src/ratingmanager.cpp
     ../src/variantdialog.cpp
 )
 
@@ -91,3 +92,16 @@ endif()
 
 # Add the test
 add_test(NAME ActionManagerTests COMMAND actionmanagertests)
+
+# RatingManager is self-contained (no MainWindow), so it gets a small target of
+# its own rather than dragging the whole application in.
+add_executable(ratingmanagertests
+    tst_ratingmanagertests.cpp
+    ../src/ratingmanager.cpp
+)
+target_include_directories(ratingmanagertests PRIVATE ../src)
+target_link_libraries(ratingmanagertests PRIVATE
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
+)
+add_test(NAME RatingManagerTests COMMAND ratingmanagertests)

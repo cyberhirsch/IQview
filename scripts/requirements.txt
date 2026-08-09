@@ -1,19 +1,45 @@
-# onnxruntime accelerator varies by platform: DirectML on Windows (works on
-# any GPU vendor, not just NVIDIA), CUDA on Linux, CoreML is built into the
-# plain package on macOS.
-onnxruntime-directml; sys_platform == "win32"
-onnxruntime-gpu; sys_platform == "linux"
-onnxruntime; sys_platform == "darwin"
-numpy
-opencv-python
-pillow
-requests
-# torch/torchvision accelerator (CUDA/MPS/CPU) is selected at install time via
-# `uv pip install --torch-backend=auto`, not pinned here.
-torch
-torchvision
-git+https://github.com/huggingface/diffusers.git
-transformers
-accelerate
-huggingface_hub
-safetensors
+# Exact pins, not ranges. A fresh install must reproduce the environment the
+# app was actually tested against — with unpinned deps (and diffusers tracked
+# from git main, as this file used to do) every new user got whatever upstream
+# shipped that morning, so a breaking release would take down Creative Fill and
+# Isolate for everyone installing after it while existing installs kept working.
+#
+# This set is the one verified working on Windows + RTX 3090. To move it:
+# bump here, delete the venv, re-run first-time setup, and exercise all three
+# AI features (Retouch, Creative Fill, Isolate) before committing.
+
+# --- Inference runtime -------------------------------------------------------
+# onnxruntime accelerator varies by platform: DirectML on Windows (works on any
+# GPU vendor, not just NVIDIA), CUDA on Linux, CoreML is built into the plain
+# package on macOS. onnxruntime-gpu publishes no macOS wheel at all.
+onnxruntime-directml==1.24.4; sys_platform == "win32"
+onnxruntime-gpu==1.24.4; sys_platform == "linux"
+onnxruntime==1.24.4; sys_platform == "darwin"
+
+# --- Torch -------------------------------------------------------------------
+# The accelerator build (CUDA / MPS / CPU) is chosen at install time by
+# `uv pip install --torch-backend=auto`, which picks the matching index. The
+# pin deliberately carries no local version label ("+cu128"): PEP 440 ignores
+# local labels when matching, so this one spec resolves correctly against the
+# CUDA, ROCm, and CPU indexes alike.
+# Note: no win_arm64 wheels exist upstream — AI features are unavailable on
+# Windows ARM64 regardless of this pin. The viewer itself still builds there.
+torch==2.11.0
+torchvision==0.26.0
+
+# --- Diffusion / segmentation stack ------------------------------------------
+# diffusers 0.37.1 is the first PyPI release carrying Flux2KleinPipeline, which
+# is why this used to point at git main. It is a real release now, so the git
+# dependency is gone.
+diffusers==0.37.1
+# transformers >= 5.5 is required for Sam3Model / Sam3Processor (Isolate).
+transformers==5.5.4
+accelerate==1.13.0
+huggingface_hub==1.10.2
+safetensors==0.7.0
+
+# --- Imaging / support -------------------------------------------------------
+numpy==2.4.4
+opencv-python==4.13.0.92
+pillow==12.2.0
+requests==2.33.1

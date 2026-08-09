@@ -1,4 +1,7 @@
 import sys
+# stdin too, not just stdout: image paths arrive from C++ as UTF-8 and would
+# otherwise be decoded with the locale codepage, corrupting any non-ASCII path.
+sys.stdin.reconfigure(encoding='utf-8')
 sys.stdout.reconfigure(encoding='utf-8')
 print("STATUS: Starting segmentation worker...", flush=True)
 

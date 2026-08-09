@@ -91,10 +91,7 @@ void ShortcutManager::initializeShortcutsList()
                            QStringList(QKeySequence(Qt::Key_I).toString()),
                            {} });
     shortcutsList.append(
-            { tr("Restore from Trash"), "undo", keyBindingsToStringList(QKeySequence::Undo), {} });
-#ifdef Q_OS_WIN
-    shortcutsList.last().readableName = tr("Undo Delete");
-#endif
+            { tr("Undo Edit"), "undo", keyBindingsToStringList(QKeySequence::Undo), {} });
     shortcutsList.append({ tr("Copy"), "copy", keyBindingsToStringList(QKeySequence::Copy), {} });
     shortcutsList.append(
             { tr("Paste"), "paste", keyBindingsToStringList(QKeySequence::Paste), {} });
@@ -224,6 +221,27 @@ void ShortcutManager::initializeShortcutsList()
                            "cancelretouch",
                            QStringList(QKeySequence(Qt::Key_Escape).toString()),
                            {} });
+    shortcutsList.append({ tr("Redo Retouch"),
+                           "retouchredo",
+                           keyBindingsToStringList(QKeySequence::Redo),
+                           {} });
+    // Culling. 1-5 / 0 / X follow Lightroom and Photo Mechanic conventions so
+    // existing muscle memory transfers. (Their P for "pick" is not used here:
+    // P is already Pause, and a 1-star rating exports to other tools where a
+    // pick flag would not.)
+    shortcutsList.append({ tr("Clear Rating"),
+                           "rate0",
+                           QStringList(QKeySequence(Qt::Key_0).toString()),
+                           {} });
+    for (int stars = 1; stars <= 5; ++stars) {
+        shortcutsList.append({ tr("Rate %n Star(s)", nullptr, stars),
+                               QString("rate%1").arg(stars),
+                               QStringList(QKeySequence(Qt::Key_0 + stars).toString()),
+                               {} });
+    }
+    shortcutsList.append(
+            { tr("Reject"), "reject", QStringList(QKeySequence(Qt::Key_X).toString()), {} });
+    shortcutsList.append({ tr("Export Keepers"), "exportkeepers", {}, {} });
     shortcutsList.append({ tr("Toggle Slideshow"), "slideshow", {}, {} });
     shortcutsList.append(
             { tr("Settings"), "options", keyBindingsToStringList(QKeySequence::Preferences), {} });

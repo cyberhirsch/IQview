@@ -107,6 +107,7 @@ MainWindow::MainWindow(QWidget *parent) : QMainWindow(parent), ui(new Ui::MainWi
     actionManager.addCloneOfAction(contextMenu, "saveimage");
     actionManager.addCloneOfAction(contextMenu, "saveimageas");
     actionManager.addCloneOfAction(contextMenu, "ailog");
+    actionManager.addCloneOfAction(contextMenu, "debugreport");
     contextMenu->addMenu(actionManager.buildHelpMenu(true, contextMenu));
 
     connect(contextMenu, &QMenu::triggered, this, [this](QAction *triggeredAction) {

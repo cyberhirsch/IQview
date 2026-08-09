@@ -1,17 +1,62 @@
 import os
 import sys
+
+# Commands arrive from C++ as UTF-8 on stdin. Python otherwise decodes stdin
+# with the locale codepage (cp1252 on a typical Windows install), which mangles
+# any non-ASCII character in a file path before the worker ever opens it --
+# and every temp path here sits under the user's profile directory, so a
+# non-ASCII Windows username breaks every job. stdout is matched so error text
+# can round-trip too.
+sys.stdin.reconfigure(encoding='utf-8')
+sys.stdout.reconfigure(encoding='utf-8')
+
 import numpy as np
 import cv2
 import onnxruntime as ort
 import time
 
 def log(msg):
-    # Log to a fixed file for debugging the persistent worker
+    # Log to a fixed file for debugging the persistent worker.
+    # encoding is explicit: the default is the locale codepage, so logging a
+    # path containing non-ASCII characters raised UnicodeEncodeError and took
+    # the whole worker down with it. Logging must never be able to kill a job.
     temp_dir = os.environ.get('TEMP', '/tmp')
     log_path = os.path.join(temp_dir, "iqview_worker_log.txt")
-    with open(log_path, "a") as f:
-        f.write(f"[{time.ctime()}] {msg}\n")
+    try:
+        with open(log_path, "a", encoding="utf-8", errors="replace") as f:
+            f.write(f"[{time.ctime()}] {msg}\n")
+    except OSError:
+        pass
     # Don't print to stdout as it's used for communication
+
+
+def imread_unicode(path, flags=cv2.IMREAD_COLOR):
+    """cv2.imread replacement that handles non-ASCII paths.
+
+    OpenCV's imread resolves paths through the C locale, so on Windows it
+    silently fails on anything outside the active ANSI codepage. Our temp
+    files live under the user's profile directory, which means every user
+    whose Windows username isn't ASCII would get "could not load" on every
+    single retouch. Reading the bytes ourselves and decoding from memory
+    sidesteps the path entirely.
+    """
+    try:
+        data = np.fromfile(path, dtype=np.uint8)
+    except OSError:
+        return None
+    if data.size == 0:
+        return None
+    return cv2.imdecode(data, flags)
+
+
+def imwrite_unicode(path, img):
+    """cv2.imwrite replacement that handles non-ASCII paths (see imread_unicode)."""
+    ext = os.path.splitext(path)[1] or ".png"
+    ok, buf = cv2.imencode(ext, img)
+    if not ok:
+        return False
+    buf.tofile(path)
+    return True
 
 
 def _download_model_if_needed(model_path):
@@ -97,20 +142,33 @@ def main():
                 
             img_path, mask_path, out_path = parts
             
-            # 1. Load
-            img = cv2.imread(img_path)
-            mask = cv2.imread(mask_path, 0)
-            
+            # 1. Load — IMREAD_UNCHANGED keeps a 4th channel when the source is
+            # an RGBA PNG (e.g. the output of Isolate). LaMa only takes BGR, so
+            # the alpha is split off here and re-attached after inpainting;
+            # without this a retouched cutout silently loses its transparency.
+            img = imread_unicode(img_path, cv2.IMREAD_UNCHANGED)
+            mask = imread_unicode(mask_path, cv2.IMREAD_GRAYSCALE)
+
             if img is None or mask is None:
                 print("ERROR: Could not load input files.")
                 sys.stdout.flush()
                 continue
-                
+
+            alpha_channel = None
+            if img.ndim == 3 and img.shape[2] == 4:
+                alpha_channel = img[:, :, 3].copy()
+                img = np.ascontiguousarray(img[:, :, :3])
+            elif img.ndim == 2:
+                img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+
+            def _with_alpha(bgr):
+                return bgr if alpha_channel is None else np.dstack([bgr, alpha_channel])
+
             # 2. Extract ROI (reused logic from retoucher.py)
             _, mask_bin = cv2.threshold(mask, 1, 255, cv2.THRESH_BINARY)
             coords = cv2.findNonZero(mask_bin)
             if coords is None:
-                cv2.imwrite(out_path, img)
+                imwrite_unicode(out_path, _with_alpha(img))
                 print("DONE")
                 sys.stdout.flush()
                 continue
@@ -178,8 +236,8 @@ def main():
             
             final_img = img.copy()
             final_img[y1:y2, x1:x2] = final_roi
-            
-            cv2.imwrite(out_path, final_img)
+
+            imwrite_unicode(out_path, _with_alpha(final_img))
             print("DONE")
             sys.stdout.flush()
             log("Job finished successfully.")

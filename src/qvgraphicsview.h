@@ -58,12 +58,19 @@ public:
     void toggleRetouchMode();
     void applyRetouch();
     bool undoRetouch();
+    bool redoRetouch();
     void applyCreativeFill();
     void applyIsolate();
     void exitRetouchMode();
     bool checkGenerativeAccess();
     void changeBrushSize(int delta);
     void showAiLogWindow();
+    void exportDebugReport();
+
+    // Culling workflow: star ratings and rejections, stored as XMP sidecars.
+    void setRatingForCurrentFile(int rating);
+    int ratingForCurrentFile();
+    void exportKeepers();
 
     const QVImageCore::FileDetails &getCurrentFileDetails() const
     {
@@ -155,6 +162,14 @@ private:
     qreal zoomBasisScaleFactor;
 
     QVImageCore imageCore{ this };
+    class RatingManager *ratingManager = nullptr;
+
+    // Brief on-screen confirmation after a rating key, so culling can be done
+    // by feel without looking away from the image.
+    QLabel *ratingLabel = nullptr;
+    QTimer *ratingLabelTimer = nullptr;
+    void showRatingFeedback(int rating);
+    void repositionRatingLabel();
 
     QTimer *expensiveScaleTimerNew;
     QPointF centerPoint;
@@ -170,7 +185,15 @@ private:
     int brushSize = 50;
     QPointF lastMouseScenePos;
     QPolygonF lassoPolygon;
-    QPixmap undoPixmap;
+
+    // Undo/redo history for AI edits. A single stored pixmap meant chaining
+    // Retouch → Fill → Isolate threw away every state but the most recent, so
+    // only the last step could ever be walked back. Depth is capped because
+    // these are full-resolution pixmaps and each one costs real memory.
+    static constexpr int MAX_UNDO_STEPS = 5;
+    QList<QPixmap> undoStack;
+    QList<QPixmap> redoStack;
+    void pushUndoState(const QPixmap &pixmap);
     QPointer<QDialog> aiLogDialog;
     // Set by the AI handlers immediately before they load their temp output;
     // consumed by loadFile() into editedSource. Any load that doesn't set it
@@ -211,6 +234,14 @@ private:
     void showAiStatus(const QString &text);
     void hideAiStatus();
     void repositionAiStatus();
+
+    // Which AI worker currently owns a job, so Escape / the HUD's Cancel
+    // button know what to interrupt. Long jobs (a 50-step Flux generation, a
+    // multi-GB model download) were previously only escapable by killing the
+    // whole application.
+    enum class AiJob { None, Retouch, Fill, Isolate };
+    AiJob activeAiJob = AiJob::None;
+    bool cancelAiOperation();
     static QString resolveScriptsDir();
     static QString resolveVenvDir();
     static QString resolvePythonExe();
@@ -218,6 +249,12 @@ private:
     static QString resolveUvExe();
     // First-run Python environment setup, shared by all AI features.
     bool ensureAiEnvironment();
+    static QString resolveEnvStampPath();
+    static QString currentEnvStamp();
+    bool confirmDiskSpace(const QString &targetDir, qint64 requiredBytes);
+    // Stamp the user declined to update this session, so a refusal is honoured
+    // for the rest of the session instead of re-prompting on every AI action.
+    QString declinedEnvStamp;
     bool ensureUvInstalled(class QProgressDialog &progress, const QString &logPath);
     static QString resolveLogPath();
     static QString resolveModelsDir();
@@ -239,7 +276,12 @@ private:
     IsolateState  isolateState   = IsolateState::Idle;
     QString       isolateInputPath;
 
-    // AI status overlay (floating label shown during model load / download)
+    // AI status HUD (floating panel shown during model load / download / inference):
+    // container holding the status text, an indeterminate progress bar, and a
+    // Cancel button.
+    QWidget *aiStatusWidget = nullptr;
     QLabel *aiStatusLabel = nullptr;
+    class QProgressBar *aiProgressBar = nullptr;
+    class QPushButton *aiCancelButton = nullptr;
 };
 #endif // QVGRAPHICSVIEW_H

@@ -1,0 +1,110 @@
+name: AI Environment
+
+# Bootstraps the Python environment exactly the way the app does on a user's
+# machine, then runs the smoke test against it. This is the only check that
+# exercises what a first-time user on macOS or Linux actually goes through --
+# the C++ build passing says nothing about whether the AI dependencies resolve
+# on that platform. A pinned version that stops publishing a wheel for one OS
+# (as onnxruntime-gpu never did for macOS) fails here instead of in a tester's
+# lap.
+#
+# Deliberately not run on every push: a full install is several GB and many
+# minutes per platform. It runs when the environment definition changes, on a
+# weekly schedule to catch upstream/registry breakage, and on demand.
+on:
+  push:
+    paths:
+      - 'scripts/requirements.txt'
+      - 'scripts/*.py'
+      - '.github/workflows/python-env.yml'
+  pull_request:
+    paths:
+      - 'scripts/requirements.txt'
+      - 'scripts/*.py'
+      - '.github/workflows/python-env.yml'
+  schedule:
+    # Mondays, 06:00 UTC
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+    inputs:
+      skip_inference:
+        description: 'Skip the LaMa inference check (avoids a ~200 MB model download)'
+        type: boolean
+        default: false
+
+jobs:
+  bootstrap:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            label: Windows
+          - os: macos-latest
+            label: macOS (Apple Silicon)
+          - os: ubuntu-latest
+            label: Linux
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Same tool the app downloads for itself at first run; using the action
+      # here just skips re-testing GitHub's own release download.
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The LaMa ONNX model (~200 MB) is fetched from Hugging Face on first
+      # inference. Caching it keeps the weekly run cheap.
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-${{ runner.os }}-lama-v1
+
+      # --clear and --python 3.12 mirror ensureAiEnvironment() in
+      # qvgraphicsview.cpp; uv provisions its own portable interpreter, so this
+      # also proves no system Python is required.
+      - name: Create virtual environment
+        shell: bash
+        run: uv venv --python 3.12 --clear .venv
+
+      # --torch-backend auto is what picks a driver-matched PyTorch build on a
+      # real machine; on these runners it resolves to the CPU wheels.
+      - name: Install dependencies
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          uv pip install --python "$PY" --torch-backend auto -r scripts/requirements.txt
+
+      - name: Report installed versions
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          uv pip list --python "$PY"
+
+      - name: Run smoke test
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" == "Windows" ]; then
+            PY=".venv/Scripts/python.exe"
+          else
+            PY=".venv/bin/python"
+          fi
+          if [ "${{ inputs.skip_inference }}" == "true" ]; then
+            "$PY" scripts/smoke_test.py --skip-inference
+          else
+            "$PY" scripts/smoke_test.py
+          fi
